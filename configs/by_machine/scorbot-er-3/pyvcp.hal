@@ -1,0 +1,12 @@
+net gripper <= pyvcp.gripper-f
+net gripper => scorbot-er-3.joint7.motor-pos-cmd
+
+net j3 <= pyvcp.j3-f
+net j3 => scorbot-er-3.joint3.motor-pos-cmd
+net j3-sw <= scorbot-er-3.joint3.limit-sw
+net j3-sw => pyvcp.j3-switch
+
+net j4 <= pyvcp.j4-f
+net j4 => scorbot-er-3.joint4.motor-pos-cmd
+net j4-sw <= scorbot-er-3.joint4.limit-sw
+net j4-sw => pyvcp.j4-switch
