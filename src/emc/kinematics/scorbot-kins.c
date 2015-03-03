@@ -77,13 +77,16 @@ int kinematicsForward(
 
     double r;
 
+    // rtapi_print("fwd: j0=%f, j1=%f, j2=%f\n", joints[0], joints[1], joints[2]);
     compute_j1_cartesian_location(joints[0], &j1_vector);
+    // rtapi_print("fwd: j1=(%f, %f, %f)\n", j1_vector.tran.x, j1_vector.tran.y, j1_vector.tran.z);
 
     // Link 1 connects j1 (shoulder) to j2 (elbow).
     r = L1_LENGTH * cos(TO_RAD * joints[1]);
     j2_vector.tran.x = r * cos(TO_RAD * joints[0]);
     j2_vector.tran.y =  r * sin(TO_RAD * joints[0]);
     j2_vector.tran.z = L1_LENGTH * sin(TO_RAD * joints[1]);
+    // rtapi_print("fwd: j2=(%f, %f, %f)\n", j2_vector.tran.x, j2_vector.tran.y, j2_vector.tran.z);
 
     // Link 2 connectes j2 (elbow) to j3 (wrist).
     // J3 is the controlled point.
@@ -91,11 +94,13 @@ int kinematicsForward(
     j3_vector.tran.x = r * cos(TO_RAD * joints[0]);
     j3_vector.tran.y =  r * sin(TO_RAD * joints[0]);
     j3_vector.tran.z = L2_LENGTH * sin(TO_RAD * joints[2]);
+    // rtapi_print("fwd: j3=(%f, %f, %f)\n", j3_vector.tran.x, j3_vector.tran.y, j3_vector.tran.z);
 
     // The end-effector location is the sum of the linkage vectors.
     pose->tran.x = j1_vector.tran.x + j2_vector.tran.x + j3_vector.tran.x;
     pose->tran.y = j1_vector.tran.y + j2_vector.tran.y + j3_vector.tran.y;
     pose->tran.z = j1_vector.tran.z + j2_vector.tran.z + j3_vector.tran.z;
+    // rtapi_print("fwd: pose=(%f, %f, %f)\n", pose->tran.x, pose->tran.y, pose->tran.z);
 
     return 0;
 }
@@ -121,12 +126,16 @@ int kinematicsInverse(
     // the location of J2, this is what we're trying to find
     double j2_r, j2_z;
 
+    // rtapi_print("inv: x=%f, y=%f, z=%f\n", pose->tran.x, pose->tran.y, pose->tran.z);
+
     // J0 is easy.  Project the (X, Y, Z) of the pose onto the Z=0 plane.
     // J0 points at the projected (X, Y) point.  tan(J0) = Y/X
     // J0 then defines the plane that the rest of the arm operates in.
     joints[0] = TO_DEG * atan2(pose->tran.y, pose->tran.x);
+    // rtapi_print("inv: j0=%f\n", joints[0]);
 
     compute_j1_cartesian_location(joints[0], &j1_cart);
+    // rtapi_print("inv: j1=(X=%f, Y=%f, Z=%f)\n", j1_cart.tran.x, j1_cart.tran.y, j1_cart.tran.z);
 
     // FIXME: Until i figure the wrist differential out, the controlled
     //     point will be the location of the wrist joint, J3/J4.
@@ -142,11 +151,13 @@ int kinematicsInverse(
     // of J0, with the origin at the location of J0.
     r1 = sqrt(pow(j1_cart.tran.x, 2) +  pow(j1_cart.tran.y, 2));
     z1 = j1_cart.tran.z;
+    // rtapi_print("inv: r1=%f, z1=%f\n", r1, z1);
 
     // (R2, Z2) is the location of J3 (the controlled point), again in the
     // plane defined by the angle of J0, with the origin of the machine.
     r2 = sqrt(pow(pose->tran.x, 2) +  pow(pose->tran.y, 2));
     z2 = pose->tran.z;
+    // rtapi_print("inv: r2=%f, z2=%f (controlled point)\n", r2, z2);
 
     // Distance between controlled point and the location of j1.  These two
     // points are separated by link 1, joint 1, and link 2.
@@ -182,11 +193,13 @@ int kinematicsInverse(
         j2_r = ir2;
         j2_z = iz2;
     }
+    // rtapi_print("inv: j2_r=%f, j2_z=%f (J2, intersection point)\n", j2_r, j2_z);
 
     // Make J1 point at J2 (j2_r, j2_z).
     {
         double l1_r = j2_r - r1;
         joints[1] = TO_DEG * acos(l1_r / L1_LENGTH);
+        // rtapi_print("inv: l1_r=%f, j1=%f\n", l1_r, joints[1]);
     }
 
     // Make J2 point at the controlled point.
@@ -198,10 +211,12 @@ int kinematicsInverse(
             j2 *= -1;
         }
         joints[2] = j2;
+        // rtapi_print("inv: l2_r=%f, j2=%f\n", l2_r, joints[2]);
     }
 
-    joints[3] = 1.234;
-    joints[4] = cos(M_PI/4);
+    // joints[3] = 1.234;
+    // joints[4] = cos(M_PI/4);
+
     // joints[3] = pose->a;
     // joints[4] = pose->b;
     // joints[5] = pose->c;
