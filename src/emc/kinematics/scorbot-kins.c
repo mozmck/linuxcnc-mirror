@@ -102,6 +102,10 @@ int kinematicsForward(
     pose->tran.z = j1_vector.tran.z + j2_vector.tran.z + j3_vector.tran.z;
     // rtapi_print("fwd: pose=(%f, %f, %f)\n", pose->tran.x, pose->tran.y, pose->tran.z);
 
+    // A and B are wrist roll and pitch, handled in hal by external kinematics
+    pose->a = joints[3];
+    pose->b = joints[4];
+
     return 0;
 }
 
@@ -214,15 +218,9 @@ int kinematicsInverse(
         // rtapi_print("inv: l2_r=%f, j2=%f\n", l2_r, joints[2]);
     }
 
-    // joints[3] = 1.234;
-    // joints[4] = cos(M_PI/4);
-
-    // joints[3] = pose->a;
-    // joints[4] = pose->b;
-    // joints[5] = pose->c;
-    // joints[6] = pose->u;
-    // joints[7] = pose->v;
-    // joints[8] = pose->w;
+    // A and B are wrist roll and pitch, handled in hal by external kinematics
+    joints[3] = pose->a;
+    joints[4] = pose->b;
 
     return 0;
 }

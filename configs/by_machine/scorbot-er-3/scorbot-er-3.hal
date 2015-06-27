@@ -15,10 +15,13 @@ loadrt [EMCMOT]EMCMOT servo_period_nsec=[EMCMOT]SERVO_PERIOD num_joints=[TRAJ]AX
 # load low-level driver
 #loadrt [HOSTMOT2](DRIVER) config=[HOSTMOT2](CONFIG)
 
+loadrt differential
+
 
 #addf hm2_[HOSTMOT2](BOARD).0.read          servo-thread
 addf motion-command-handler                servo-thread
 addf motion-controller                     servo-thread
+addf differential.0                        servo-thread
 #addf pid.0.do-pid-calcs                    servo-thread
 #addf pid.1.do-pid-calcs                    servo-thread
 #addf pid.2.do-pid-calcs                    servo-thread
@@ -125,14 +128,17 @@ setp scorbot-er-3.joint2.scale [AXIS_2]SCALE
 # Joint 3
 #
 
-#net j3.cmd <= axis.3.motor-pos-cmd
-#net j3.cmd => scorbot-er-3.joint3.motor-pos-cmd
-#net j3.cmd => axis.3.motor-pos-fb
+net wrist-pitch.cmd <= axis.3.motor-pos-cmd
+net wrist-pitch.cmd => differential.0.pitch
+net wrist-pitch.cmd => axis.3.motor-pos-fb
 
-#net j3.limit <= scorbot-er-3.joint3.limit-sw
-#net j3.limit => axis.3.home-sw-in
-#net j3.limit => axis.3.neg-lim-sw-in
-#net j3.limit => axis.3.pos-lim-sw-in
+net j3.cmd <= differential.0.motor0
+net j3.cmd => scorbot-er-3.joint3.motor-pos-cmd
+
+net wrist-pitch.limit <= scorbot-er-3.joint3.limit-sw
+net wrist-pitch.limit => axis.3.home-sw-in
+net wrist-pitch.limit => axis.3.neg-lim-sw-in
+net wrist-pitch.limit => axis.3.pos-lim-sw-in
 
 setp scorbot-er-3.joint3.scale [AXIS_3]SCALE
 
@@ -141,14 +147,17 @@ setp scorbot-er-3.joint3.scale [AXIS_3]SCALE
 # Joint 4
 #
 
-#net j4.cmd <= axis.4.motor-pos-cmd
-#net j4.cmd => scorbot-er-3.joint4.motor-pos-cmd
-#net j4.cmd => axis.4.motor-pos-fb
+net wrist-roll.cmd <= axis.4.motor-pos-cmd
+net wrist-roll.cmd => differential.0.roll
+net wrist-roll.cmd => axis.4.motor-pos-fb
 
-#net j4.limit <= scorbot-er-3.joint4.limit-sw
-#net j4.limit => axis.4.home-sw-in
-#net j4.limit => axis.4.neg-lim-sw-in
-#net j4.limit => axis.4.pos-lim-sw-in
+net j4.cmd <= differential.0.motor1
+net j4.cmd => scorbot-er-3.joint4.motor-pos-cmd
+
+net wrist-roll.limit <= scorbot-er-3.joint4.limit-sw
+net wrist-roll.limit => axis.4.home-sw-in
+net wrist-roll.limit => axis.4.neg-lim-sw-in
+net wrist-roll.limit => axis.4.pos-lim-sw-in
 
 setp scorbot-er-3.joint4.scale [AXIS_4]SCALE
 

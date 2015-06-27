@@ -14,48 +14,4 @@
         </vbox>
     </labelframe>
 
-    <labelframe text="J3">
-        <vbox>
-
-            <scale>
-                <halpin>"j3"</halpin>
-                <resolution>1</resolution>
-                <orient>HORIZONTAL</orient>
-                <initval>0</initval>
-                <min_>-180</min_>
-                <max_>180</max_>
-            </scale>
-
-            <hbox>
-                <label>
-                    <text>"J3 Switch: "</text>
-                </label>
-                <led halpin="j3-switch"/>
-            </hbox>
-
-        </vbox>
-    </labelframe>
-
-    <labelframe text="J4">
-        <vbox>
-
-            <scale>
-                <halpin>"j4"</halpin>
-                <resolution>1</resolution>
-                <orient>HORIZONTAL</orient>
-                <initval>0</initval>
-                <min_>-180</min_>
-                <max_>180</max_>
-            </scale>
-
-            <hbox>
-                <label>
-                    <text>"J4 Switch: "</text>
-                </label>
-                <led halpin="j4-switch"/>
-            </hbox>
-
-        </vbox>
-    </labelframe>
-
 </pyvcp>
