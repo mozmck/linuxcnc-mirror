@@ -1,0 +1,12 @@
+component dmux2_bit "Send bit input to one of two bit outputs";
+pin in bit sel "If TRUE, \\fBin\\fR is routed to \\fBout0\\fR; if FALSE, \\fBin\\fR is routed to \\fBout1\\fR";
+pin in bit in;
+pin out bit out0;
+pin out bit out1;
+function _ nofp;
+license "GPL";
+;;
+FUNCTION(_) {
+    if(sel) out0 = in;
+    else out1 = in;
+}
