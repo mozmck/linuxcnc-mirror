@@ -47,6 +47,8 @@ int emcPoseGetUVW(EmcPose const * const pose, PmCartesian * const uvw);
 
 int emcPoseMagnitude(EmcPose const * const pose, double * const out);
 
+int emcPoseSetJoint(EmcPose *pose, EmcPose const * const from, const int joint);
+
 int emcPoseValid(EmcPose const * const pose);
 
 #endif

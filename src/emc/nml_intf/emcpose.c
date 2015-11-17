@@ -284,6 +284,43 @@ int emcPoseMagnitude(EmcPose const * const pose, double * const out) {
     return EMCPOSE_ERR_OK;
 }
 
+int emcPoseSetJoint(EmcPose *pose, EmcPose const * const from, const int joint)
+{
+    switch (joint)
+    {
+    case 0:
+        pose->tran.x = from->tran.x;
+        break;
+    case 1:
+        pose->tran.y = from->tran.y;
+        break;
+    case 2:
+        pose->tran.z = from->tran.z;
+        break;
+    case 3:
+        pose->a = from->a;
+        break;
+    case 4:
+        pose->b = from->b;
+        break;
+    case 5:
+        pose->c = from->c;
+        break;
+    case 6:
+        pose->u = from->u;
+        break;
+    case 7:
+        pose->v = from->v;
+        break;
+    case 8:
+        pose->w = from->w;
+        break;
+    default:
+        return EMCPOSE_ERR_FAIL;
+    }
+    return EMCPOSE_ERR_OK;
+}
+
 
 /**
  * Return true for a numerically valid pose, or false for an invalid pose (or null pointer).

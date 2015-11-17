@@ -25,6 +25,7 @@
 #include "motion_debug.h"
 #include "config.h"
 #include "motion_types.h"
+#include "emcpose.h"
 
 // Mark strings for translation, but defer translation to userspace
 #define _(s) (s)
@@ -553,6 +554,13 @@ static void process_inputs(void)
 	    SET_JOINT_FERROR_FLAG(joint, 0);
 	}
 
+	/* if we just switched from disabled to enabled... */
+	if (joint->disable && !*(joint_data->disable)) {
+	    tpSetPos(&emcmotDebug->tp, &emcmotStatus->carte_pos_cmd);
+            cubicDrain(&(joint->cubic));
+	}
+	joint->disable = *(joint_data->disable);
+
 	/* read limit switches */
 	if (*(joint_data->pos_lim_sw)) {
 	    SET_JOINT_PHL_FLAG(joint, 1);
@@ -1055,6 +1063,7 @@ static void get_pos_cmds(long period)
 {
     int joint_num, result;
     emcmot_joint_t *joint;
+    joint_hal_t *joint_data;
     double positions[EMCMOT_MAX_JOINTS];
 /*! \todo Another #if 0 */
 #if 0
@@ -1252,6 +1261,17 @@ static void get_pos_cmds(long period)
 	    tpRunCycle(&emcmotDebug->tp, period);
 	    /* gt new commanded traj pos */
 	    tpGetPos(&emcmotDebug->tp, &emcmotStatus->carte_pos_cmd);
+
+	    for (joint_num = 0; joint_num < num_joints; joint_num++) {
+	        /* point to joint struct */
+	        joint = &joints[joint_num];
+	        joint_data = &(emcmot_hal_data->joint[joint_num]);
+	        if (*(joint_data->disable) != 0) {
+	            emcPoseSetJoint(&emcmotStatus->carte_pos_cmd, &emcmotStatus->carte_pos_fb, joint_num);
+	            //emcmotStatus->carte_pos_cmd.tran.x = joint->pos_cmd
+	        }
+	    }
+	    
 	    /* OUTPUT KINEMATICS - convert to joints in local array */
 	    kinematicsInverse(&emcmotStatus->carte_pos_cmd, positions,
 		&iflags, &fflags);
@@ -1259,7 +1279,13 @@ static void get_pos_cmds(long period)
 	    for (joint_num = 0; joint_num < num_joints; joint_num++) {
 		/* point to joint struct */
 		joint = &joints[joint_num];
-		joint->coarse_pos = positions[joint_num];
+		joint_data = &(emcmot_hal_data->joint[joint_num]);
+		if (*(joint_data->disable) != 0) {
+		    joint->coarse_pos = joint->pos_fb;
+		}
+		else {
+		    joint->coarse_pos = positions[joint_num];
+		}
 		/* spline joints up-- note that we may be adding points
 		   that fail soft limits, but we'll abort at the end of
 		   this cycle so it doesn't really matter */
@@ -1275,9 +1301,17 @@ static void get_pos_cmds(long period)
 	    /* save old command */
 	    old_pos_cmd = joint->pos_cmd;
 	    /* interpolate to get new one */
-	    joint->pos_cmd = cubicInterpolate(&(joint->cubic), 0, 0, 0, 0);
-	    joint->vel_cmd = (joint->pos_cmd - old_pos_cmd) * servo_freq;
+		joint_data = &(emcmot_hal_data->joint[joint_num]);
+		if (*(joint_data->disable) != 0) {
+		    joint->pos_cmd = joint->pos_fb;
+		    joint->vel_cmd = 0.0;
+		}
+		else {
+		    joint->pos_cmd = cubicInterpolate(&(joint->cubic), 0, 0, 0, 0);
+		    joint->vel_cmd = (joint->pos_cmd - old_pos_cmd) * servo_freq;
+		}
 	}
+	
 	/* report motion status */
 	SET_MOTION_INPOS_FLAG(0);
 	if (tpIsDone(&emcmotDebug->tp)) {
