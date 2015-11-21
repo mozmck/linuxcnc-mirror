@@ -558,6 +558,14 @@ static void process_inputs(void)
 	if (joint->disable && !*(joint_data->disable)) {
 	    tpSetPos(&emcmotDebug->tp, &emcmotStatus->carte_pos_cmd);
             cubicDrain(&(joint->cubic));
+            joint->free_pos_cmd = joint->pos_cmd;
+            SET_JOINT_ENABLE_FLAG(joint, 1);
+            SET_JOINT_HOMING_FLAG(joint, 0);
+            joint->home_state = HOME_IDLE;
+            /* clear any outstanding joint errors when going into enabled
+               state */
+            SET_JOINT_ERROR_FLAG(joint, 0);
+            //emcTaskPlanSynch();  // <-- I don't think I can do this here.
 	}
 	joint->disable = *(joint_data->disable);
 
@@ -746,7 +754,7 @@ static void check_for_faults(void)
 	/* point to joint data */
 	joint = &joints[joint_num];
 	/* only check active, enabled axes */
-	if ( GET_JOINT_ACTIVE_FLAG(joint) && GET_JOINT_ENABLE_FLAG(joint) ) {
+	if ( GET_JOINT_ACTIVE_FLAG(joint) && GET_JOINT_ENABLE_FLAG(joint) && !joint->disable ) {
 	    /* are any limits for this joint overridden? */
 	    neg_limit_override = emcmotStatus->overrideLimitMask & ( 1 << (joint_num*2));
 	    pos_limit_override = emcmotStatus->overrideLimitMask & ( 2 << (joint_num*2));
@@ -1063,7 +1071,6 @@ static void get_pos_cmds(long period)
 {
     int joint_num, result;
     emcmot_joint_t *joint;
-    joint_hal_t *joint_data;
     double positions[EMCMOT_MAX_JOINTS];
 /*! \todo Another #if 0 */
 #if 0
@@ -1265,8 +1272,7 @@ static void get_pos_cmds(long period)
 	    for (joint_num = 0; joint_num < num_joints; joint_num++) {
 	        /* point to joint struct */
 	        joint = &joints[joint_num];
-	        joint_data = &(emcmot_hal_data->joint[joint_num]);
-	        if (*(joint_data->disable) != 0) {
+	        if (joint->disable != 0) {
 	            emcPoseSetJoint(&emcmotStatus->carte_pos_cmd, &emcmotStatus->carte_pos_fb, joint_num);
 	            //emcmotStatus->carte_pos_cmd.tran.x = joint->pos_cmd
 	        }
@@ -1279,8 +1285,7 @@ static void get_pos_cmds(long period)
 	    for (joint_num = 0; joint_num < num_joints; joint_num++) {
 		/* point to joint struct */
 		joint = &joints[joint_num];
-		joint_data = &(emcmot_hal_data->joint[joint_num]);
-		if (*(joint_data->disable) != 0) {
+		if (joint->disable != 0) {
 		    joint->coarse_pos = joint->pos_fb;
 		}
 		else {
@@ -1301,15 +1306,14 @@ static void get_pos_cmds(long period)
 	    /* save old command */
 	    old_pos_cmd = joint->pos_cmd;
 	    /* interpolate to get new one */
-		joint_data = &(emcmot_hal_data->joint[joint_num]);
-		if (*(joint_data->disable) != 0) {
-		    joint->pos_cmd = joint->pos_fb;
-		    joint->vel_cmd = 0.0;
-		}
-		else {
-		    joint->pos_cmd = cubicInterpolate(&(joint->cubic), 0, 0, 0, 0);
-		    joint->vel_cmd = (joint->pos_cmd - old_pos_cmd) * servo_freq;
-		}
+	    if (joint->disable != 0) {
+	        joint->pos_cmd = joint->pos_fb;
+	        joint->vel_cmd = 0.0;
+	    }
+	    else {
+	        joint->pos_cmd = cubicInterpolate(&(joint->cubic), 0, 0, 0, 0);
+	        joint->vel_cmd = (joint->pos_cmd - old_pos_cmd) * servo_freq;
+	    }
 	}
 	
 	/* report motion status */
