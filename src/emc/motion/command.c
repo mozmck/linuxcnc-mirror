@@ -1667,6 +1667,11 @@ check_stuff ( "before command_handler()" );
         emcmotConfig->consistencyCheckConfig = emcmotCommand->consistencyCheckConfig;
         break;
 
+    case EMCMOT_SET_PROBE_ERR_INHIBIT:
+        emcmotConfig->inhibit_probe_jog_error = emcmotCommand->probe_jog_err_inhibit;
+        emcmotConfig->inhibit_probe_home_error = emcmotCommand->probe_home_err_inhibit;
+        break;
+
     default:
         rtapi_print_msg(RTAPI_MSG_DBG, "UNKNOWN");
         reportError(_("unrecognized command %d"), emcmotCommand->command);

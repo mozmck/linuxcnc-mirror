@@ -177,6 +177,7 @@ extern "C" {
         EMCMOT_SET_OFFSET, /* set tool offsets */
         EMCMOT_SET_MAX_FEED_OVERRIDE,
         EMCMOT_SETUP_ARC_BLENDS,
+        EMCMOT_SET_PROBE_ERR_INHIBIT,
         EMCMOT_SETUP_CONSISTENCY_CHECKS,
     } cmd_code_t;
 
@@ -255,6 +256,8 @@ typedef struct {
                                      |1 = suppress error, report in # instead
                                      ~2 = move until probe trips (ngc default)
                                      |2 = move until probe clears */
+        int probe_jog_err_inhibit;  // setting to inhibit probe tripped while jogging error.
+        int probe_home_err_inhibit;  // setting to inhibit probe tripped while homeing error.
         EmcPose tool_offset;        /* TLO */
 	double  orientation;    /* angle for spindle orient */
 	char    direction;      /* CANON_DIRECTION flag for spindle orient */
@@ -773,7 +776,9 @@ typedef enum {
         double arcBlendRampFreq;
         double arcBlendTangentKinkRatio;
         double maxFeedScale;
-    consistency_check_config_t consistencyCheckConfig;
+        int inhibit_probe_jog_error;
+        int inhibit_probe_home_error;
+        consistency_check_config_t consistencyCheckConfig;
     } emcmot_config_t;
 
 /*********************************
