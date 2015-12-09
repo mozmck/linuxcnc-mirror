@@ -630,6 +630,11 @@ int main(int argc, char* argv[]) {
                 log_print("SETUP_CONSISTENCY_CHECKS enabled=%d, position_drift=%f\n",
                           c->consistencyCheckConfig.extraConsistencyChecks,
                           c->consistencyCheckConfig.maxPositionDriftError);
+
+            case EMCMOT_SET_PROBE_ERR_INHIBIT:
+                log_print("SETUP_SET_PROBE_ERR_INHIBIT %d %d\n",
+                          c->probe_jog_err_inhibit,
+                          c->probe_home_err_inhibit);
                 break;
 
             default:
