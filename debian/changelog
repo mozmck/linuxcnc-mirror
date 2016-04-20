@@ -1,3 +1,16 @@
+linuxcnc (1:2.7.4~ccc1.2) trusty; urgency=low
+
+  * show_errors.tcl: better error reporting, create zip file of errors and config
+  * Added oxyfuel.comp and thcenable.comp
+  * Merged 2.7.4
+  * Update version to 2.7.3~ccc1.1
+  * Added gantry.comp
+  * Teach motion-logger about the new message, and fix tests accordingly
+  * Version update to 2.7.3~ccc1.0
+  * Added ini settings to disable probe errors while jogging and homing.
+
+ -- Moses McKnight <moses@texband.net>  Thu, 24 Mar 2016 14:09:38 -0500
+
 linuxcnc (1:2.7.4) unstable; urgency=medium
 
   * docs: update hm2_eth manpage with supported boards
