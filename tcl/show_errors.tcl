@@ -37,17 +37,37 @@ proc insert_file {w title f {p {}}} {
     $w insert end "\n"
 }
 
+#this procedure creates a file with error information included
+proc create_error_file {p_file dbg_file} {
+    set savedir ""
+    while {$savedir eq ""} {
+        set savedir [tk_chooseDirectory -initialdir $::env(HOME) -title "Choose a Directory to Save Error File..."]
+    }
+    
+    set presdir $::env(PWD)
+    set configdir [exec basename $presdir]
+    cd $savedir
+    file mkdir ccc_err
+    file copy -force $p_file "ccc_err/print_file"
+    file copy -force $dbg_file "ccc_err/debug_file"
+    exec dmesg > ccc_err/dmesg_output.txt
+    file copy -force $presdir "ccc_err/$configdir"
+    exec zip -r ccc_err_[clock format [clock seconds] -format "%Y-%m-%d_%H%M%S"].zip ccc_err
+    file delete -force ccc_err
+    cd $presdir
+}
+
 
 wm ti . [msgcat::mc "LinuxCNC Errors"]
 frame .f
 label .f.b -bitmap error
-label .f.l -justify l -wraplength 400 -text [msgcat::mc "LinuxCNC terminated with an error.  When reporting problems, please include all the information below in your message."]
+label .f.l -justify l -wraplength 400 -text [msgcat::mc "LinuxCNC terminated with an error.  To report problems, please click Create Error File, select a folder (usually a flash drive) and click OK.  A file named ccc_err_<datecode>.zip will be created which you can send to us for analysis.  Click CLOSE to close window."]
 pack .f.b -side left -padx 8 -pady 8
 pack .f.l -side left
 pack .f -side top -fill x -anchor w
 
 frame .f2
-text .f2.t -yscrollcommand [list .f2.s set] -height 24
+text .f2.t -yscrollcommand [list .f2.s set] -height 24 -wrap word
 scrollbar .f2.s -command [list .f2.t yview]
 grid rowconfigure .f2 0 -weight 1
 grid columnconfigure .f2 0 -weight 1
@@ -56,17 +76,30 @@ grid .f2.s -row 0 -column 1 -sticky ns
 .f2.t tag configure title -font {Helvetica 16 bold}
 pack .f2 -fill both -expand 1
 
-insert_file .f2.t "Print file information:" [lindex $argv 1]
-insert_file .f2.t "Debug file information:" [lindex $argv 0]
-if {$linuxcnc::SIMULATOR != "yes"} {
-    insert_file .f2.t "Kernel message information:" {|dmesg} \
-	"^.*Adeos: Pipelining started\.|^.*I-pipe: Domain RTAI registered\."
+#test code*************************************
+#.f2.t insert end "Hello World!\n"
+
+#**********************************************
+
+set fileID [open [lindex $argv 1] "r"]
+set file_data [read $fileID]
+close $fileID
+if [ regexp "Could not retrieve mac address" $file_data ] {
+    .f2.t insert end "\n***** Could not connect to the ethernet motion control hardware. *****\n\nPlease make sure the control box is powered on and connected before starting LinuxCNC.\n"
+} else {
+    insert_file .f2.t "Print file information:" [lindex $argv 1]
+    insert_file .f2.t "Debug file information:" [lindex $argv 0]
 }
 .f2.t configure -state disabled
 
 frame .f3
-button .f3.b1 -text [msgcat::mc "Select All"] -command {.f2.t tag add sel 0.0 end; tk_textCopy .f2.t} -width 15 -padx 4 -pady 1
-button .f3.b2 -text [msgcat::mc "Close"] -command {destroy .} -width 15 -padx 4 -pady 1
+button .f3.b1 -text [msgcat::mc "Create Error File"] -underline 7 -command {create_error_file [lindex $argv 1] [lindex $argv 0]} -width 15 -padx 4 -pady 1
+button .f3.b2 -text [msgcat::mc "Select All"] -underline 0 -command {.f2.t tag add sel 0.0 end; tk_textCopy .f2.t} -width 15 -padx 4 -pady 1
+button .f3.b3 -text [msgcat::mc "Close"] -underline 0 -command {destroy .} -width 15 -padx 4 -pady 1
+bind . <Key-e> {.f3.b1 flash; .f3.b1 invoke}
+bind . <Key-s> {.f3.b2 flash; .f3.b2 invoke}
+bind . <Key-c> {.f3.b3 flash; .f3.b3 invoke}
 pack .f3.b1 -side left -anchor e -padx 4 -pady 4
 pack .f3.b2 -side left -anchor e -padx 4 -pady 4
+pack .f3.b3 -side left -anchor e -padx 4 -pady 4
 pack .f3 -side top -anchor e
