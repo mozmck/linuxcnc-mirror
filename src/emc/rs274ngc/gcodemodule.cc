@@ -729,7 +729,7 @@ static PyObject *parse_file(PyObject *self, PyObject *args) {
     }
     while(!interp_error && RESULT_OK) {
         error_line_offset = 1;
-        result = interp_new.read();
+        result = interp_new.read(0);
         gettimeofday(&t1, NULL);
         if(t1.tv_sec > t0.tv_sec + wait) {
             if(check_abort()) return NULL;

@@ -530,16 +530,16 @@ int emcTaskPlanOpen(const char *file)
 }
 
 
-int emcTaskPlanRead()
+int emcTaskPlanRead(int skipparse)
 {
-    int retval = interp.read();
+    int retval = interp.read(skipparse);
     if (retval == INTERP_FILE_NOT_OPEN) {
 	if (emcStatus->task.file[0] != 0) {
 	    retval = interp.open(emcStatus->task.file);
 	    if (retval > INTERP_MIN_ERROR) {
 		print_interp_error(retval);
 	    }
-	    retval = interp.read();
+	    retval = interp.read(skipparse);
 	}
     }
     if (retval > INTERP_MIN_ERROR) {
@@ -547,7 +547,7 @@ int emcTaskPlanRead()
     }
     
     if (emc_debug & EMC_DEBUG_INTERP) {
-        rcs_print("emcTaskPlanRead() returned %d\n", retval);
+        rcs_print("emcTaskPlanRead(%d) returned %d\n", skipparse, retval);
     }
     
     return retval;
