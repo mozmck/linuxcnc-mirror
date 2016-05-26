@@ -1121,6 +1121,37 @@ static PyObject *emcauto(pyCommandChannel *s, PyObject *o) {
     return Py_None;
 }
 
+static PyObject *srfl_auto(pyCommandChannel *s, PyObject *o) {
+    int fn;
+    EMC_TASK_PLAN_SIMPLE_RUN run;
+    EMC_TASK_PLAN_PAUSE pause;
+    EMC_TASK_PLAN_RESUME resume;
+    EMC_TASK_PLAN_STEP step;
+
+    if(PyArg_ParseTuple(o, "ii", &fn, &run.line) && fn == LOCAL_AUTO_RUN) {
+        emcSendCommand(s, run);
+    } else {
+        PyErr_Clear();
+        if(!PyArg_ParseTuple(o, "i", &fn)) return NULL;
+        switch(fn) {
+        case LOCAL_AUTO_PAUSE:
+            emcSendCommand(s, pause);
+            break;
+        case LOCAL_AUTO_RESUME:
+            emcSendCommand(s, resume);
+            break;
+        case LOCAL_AUTO_STEP:
+            emcSendCommand(s, step);
+            break;
+        default:
+            PyErr_Format(error, "Unexpected argument '%d' to command.auto", fn);
+            return NULL;
+        }
+    }
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
 static PyObject *debug(pyCommandChannel *s, PyObject *o) {
     EMC_SET_DEBUG d;
 
@@ -1296,6 +1327,7 @@ static PyMethodDef Command_methods[] = {
     {"reset_interpreter", (PyCFunction)reset_interpreter, METH_NOARGS},
     {"program_open", (PyCFunction)program_open, METH_VARARGS},
     {"auto", (PyCFunction)emcauto, METH_VARARGS},
+    {"srfl_auto", (PyCFunction)srfl_auto, METH_VARARGS},
     {"set_optional_stop", (PyCFunction)optional_stop, METH_VARARGS},
     {"set_block_delete", (PyCFunction)block_delete, METH_VARARGS},
     {"set_min_limit", (PyCFunction)set_min_limit, METH_VARARGS},
