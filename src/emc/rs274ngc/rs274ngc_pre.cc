@@ -1432,7 +1432,7 @@ zero, this parses the line into the _setup.block1.
 
 */
 
-int Interp::_read(const char *command)  //!< may be NULL or a string to read
+int Interp::_read(const char *command, int skipparse)  //!< may be NULL or a string to read
 {
   static char name[] = "Interp::read";
   int read_status;
@@ -1554,8 +1554,8 @@ int Interp::_read(const char *command)  //!< may be NULL or a string to read
   if(command)logDebug("%s:[cmd]:|%s|", name, command);
   else logDebug("%s:|%s|", name, _setup.linetext);
 
-  if ((read_status == INTERP_EXECUTE_FINISH)
-      || (read_status == INTERP_OK)) {
+  if (!skipparse && ((read_status == INTERP_EXECUTE_FINISH)
+      || (read_status == INTERP_OK))) {
     if (_setup.line_length != 0) {
 	CHP(parse_line(_setup.blocktext, &(EXECUTING_BLOCK(_setup)), &_setup));
     }
@@ -1585,7 +1585,7 @@ int Interp::_read(const char *command)  //!< may be NULL or a string to read
 int Interp::read(const char *command) 
 {
     int status;
-    if ((status = _read(command)) > INTERP_MIN_ERROR) {
+    if ((status = _read(command, 0)) > INTERP_MIN_ERROR) {
 	unwind_call(status, __FILE__,__LINE__,__FUNCTION__);
     }
     return status;
@@ -1650,8 +1650,12 @@ int Interp::unwind_call(int status, const char *file, int line, const char *func
     return INTERP_OK;
 }
 
-int Interp::read() {
-  return read(0);
+int Interp::read(int skipparse) {
+    int status;
+    if ((status = _read(0, skipparse)) > INTERP_MIN_ERROR) {
+        unwind_call(status, __FILE__,__LINE__,__FUNCTION__);
+    }
+    return status;
 }
 /***********************************************************************/
 

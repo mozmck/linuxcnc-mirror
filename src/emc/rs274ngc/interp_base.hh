@@ -41,7 +41,7 @@ public:
     virtual int synch() = 0;
     virtual int exit() = 0;
     virtual int open(const char *filename) = 0;
-    virtual int read() = 0;
+    virtual int read(int skipparse) = 0;
     virtual int read(const char *line) = 0;
     virtual int close() = 0;
     virtual int reset() = 0;

@@ -52,7 +52,7 @@ public:
 
 // read the mdi or the next line of the open NC code file
  int read(const char *mdi);
- int read();
+ int read(int skipparse);
 
 // reset yourself
  int reset();
@@ -393,7 +393,7 @@ public:
  int parse_line(char *line, block_pointer block,
                       setup_pointer settings);
  int precedence(int an_operator);
- int _read(const char *command);
+ int _read(const char *command, int skipparse = 0);
  int read_a(char *line, int *counter, block_pointer block,
                   double *parameters);
  int read_atan(char *line, int *counter, double *double_ptr,

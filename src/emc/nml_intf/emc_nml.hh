@@ -1258,6 +1258,23 @@ class EMC_TASK_PLAN_RUN:public EMC_TASK_CMD_MSG {
     // negative means run through to verify
 };
 
+// This SIMPLE_RUN class differs from the RUN class in that if a line number is
+// given to start from, it starts from that line without skipping through all the
+// preceeding code first.
+class EMC_TASK_PLAN_SIMPLE_RUN:public EMC_TASK_CMD_MSG {
+  public:
+    EMC_TASK_PLAN_SIMPLE_RUN()
+      : EMC_TASK_CMD_MSG(EMC_TASK_PLAN_SIMPLE_RUN_TYPE, sizeof(EMC_TASK_PLAN_SIMPLE_RUN))
+      , line(0)
+    {};
+
+    // For internal NML/CMS use only.
+    void update(CMS * cms);
+
+    int line;                   // line to run from; 0 or 1 means from start,
+    // negative means run through to verify
+};
+
 class EMC_TASK_PLAN_READ:public EMC_TASK_CMD_MSG {
   public:
     EMC_TASK_PLAN_READ():EMC_TASK_CMD_MSG(EMC_TASK_PLAN_READ_TYPE,
