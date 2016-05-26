@@ -178,6 +178,8 @@ struct PM_CARTESIAN;
 #define EMC_TASK_PLAN_SET_OPTIONAL_STOP_TYPE         ((NMLTYPE) 517)
 #define EMC_TASK_PLAN_SET_BLOCK_DELETE_TYPE          ((NMLTYPE) 518)
 #define EMC_TASK_PLAN_OPTIONAL_STOP_TYPE             ((NMLTYPE) 519)
+#define EMC_TASK_PLAN_SIMPLE_RUN_TYPE                ((NMLTYPE) 520)
+
 
 #define EMC_TASK_STAT_TYPE                           ((NMLTYPE) 599)
 
