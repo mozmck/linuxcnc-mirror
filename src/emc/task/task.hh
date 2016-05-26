@@ -19,6 +19,7 @@
 extern NMLmsg *emcTaskCommand;
 extern int stepping;
 extern int steppingWait;
+extern int simpleRunFromLine;  // non-zero if we should totally ignore all lines before programStartLine
 extern int emcTaskQueueCommand(NMLmsg *cmd);
 extern int emcPluginCall(EMC_EXEC_PLUGIN_CALL *call_msg);
 extern int emcIoPluginCall(EMC_IO_PLUGIN_CALL *call_msg);
@@ -42,7 +43,7 @@ int emcTaskPlanSetOptionalStop(bool state);
 int emcTaskPlanSetBlockDelete(bool state);
 void emcTaskPlanExit();
 int emcTaskPlanOpen(const char *file);
-int emcTaskPlanRead();
+int emcTaskPlanRead(int skipparse);
 int emcTaskPlanExecute(const char *command);
 int emcTaskPlanExecute(const char *command, int line_number); //used in case of MDI to pass the pseudo line number to interp
 int emcTaskPlanPause();

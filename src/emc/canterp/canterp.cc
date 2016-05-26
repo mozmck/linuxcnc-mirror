@@ -80,7 +80,7 @@ public:
     int synch();
     int exit();
     int open(const char *filename);
-    int read();
+    int read(int skipparse);
     int read(const char *line);
     int close();
     int reset();
@@ -239,7 +239,7 @@ int Canterp::read(const char *line) {
     return canterp_parse((char *) line);
 }
 
-int Canterp::read() {
+int Canterp::read(int skipparse) {
     char buf[LINELEN];
     if(!f) return INTERP_ERROR;
     if(!fgets(buf, sizeof(buf), f)) return INTERP_ENDFILE;
