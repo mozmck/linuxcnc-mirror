@@ -418,7 +418,7 @@ static int interpResumeState = EMC_TASK_INTERP_IDLE;
 static int programStartLine = 0;	// which line to run program from
 
 // non-zero if we should totally ignore all lines before programStartLine
-static int simpleRunFromLine = 0;
+int simpleRunFromLine = 0;
 
 int stepping = 0;
 int steppingWait = 0;
@@ -550,6 +550,7 @@ void readahead_reading(void)
 {
     int readRetval;
     int execRetval;
+    int skipparse;
 
     if (interp_list.len() <= emc_task_interp_max_len) {
         int count = 0;
@@ -563,7 +564,8 @@ interpret_again:
                 emcTaskPlanClearWait();
              }
         } else {
-            readRetval = emcTaskPlanRead();
+            skipparse = (simpleRunFromLine && (emcStatus->task.readLine < programStartLine)) ? 1 : 0;
+            readRetval = emcTaskPlanRead(skipparse);
             /*! \todo MGS FIXME
                This if() actually evaluates to if (readRetval != INTERP_OK)...
                *** Need to look at all calls to things that return INTERP_xxx values! ***
@@ -591,11 +593,8 @@ interpret_again:
                 // if simple run-from-line was requested, don't execute the commands at all
                 // if we have not reached the programStartLine yet
                 if (simpleRunFromLine && (emcStatus->task.readLine < programStartLine)) {
-                    //interp_list.clear();
+                    //interp_list.clear(); // <--should not need this, because we are not calling emcTaskPlanExecute()
                     if (emcStatus->task.readLine + 1 == programStartLine) {
-
-                        //interp_list.clear();
-
                         //update the position with our current position, as the other positions are only skipped through
                         CANON_UPDATE_END_POINT(emcStatus->motion.traj.actualPosition.tran.x,
                                                emcStatus->motion.traj.actualPosition.tran.y,

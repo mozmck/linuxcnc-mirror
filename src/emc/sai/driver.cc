@@ -251,7 +251,7 @@ int interpret_from_file( /* ARGUMENTS                  */
 
   for(; ;)
     {
-      status = interp_read();
+      status = interp_read(0);
       if ((status == INTERP_EXECUTE_FINISH) && (block_delete == ON))
         continue;
       else if (status == INTERP_ENDFILE)
