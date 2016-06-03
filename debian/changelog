@@ -1,15 +1,96 @@
-linuxcnc (1:2.7.4~ccc1.2) trusty; urgency=low
+linuxcnc (1:2.7.4~ccc1.3) trusty; urgency=low
 
-  * show_errors.tcl: better error reporting, create zip file of errors and config
-  * Added oxyfuel.comp and thcenable.comp
-  * Merged 2.7.4
-  * Update version to 2.7.3~ccc1.1
-  * Added gantry.comp
+  * Add oxyfuel.comp, thcenable.comp, improved error reporting. ~ccc1.2
   * Teach motion-logger about the new message, and fix tests accordingly
-  * Version update to 2.7.3~ccc1.0
   * Added ini settings to disable probe errors while jogging and homing.
+  * Simple run-from-line now appears to work.
+  * First attempt at Simple-Run-From-Line - doesn't work.
+  * -----------------------------------------------------------------
+  * Above this are commandcnc commits on top of the 2.7 branch
+  * Below this until the next release are commits since the last release (2.7.4)
+  * -----------------------------------------------------------------
+  * Added callLevel to EMC_TASK_STAT class, to fix hal_glib file-loaded bug.
+  * rs274ngc_pre.cc msg for INTERP_FILE_NOT_OPEN
+  * GladeVCP - gremlin - corrected mouse button 6 behavior
+  * docs: clarify the intro to the python-interface documentation
+  * docs: fix typo in config/python-interface.txt
+  * gmoccapy_1_5_6_3 - small bug fixes (iconview and handlers)
+  * GladeVCP - IconView - Bug due to double click
+  * rtapi_parport.h: make all inline functions static
+  * configure: detect potential readline license conflict
+  * debian/configure: modernize usage/help message
+  * halui: check for errors in a non-crazy way
+  * motion: remove overruns parameter
+  * irq-coalesce requires ethtools
+  * gladevcp: Fix mdi error with tiny values
+  * configs: let it trigger a gladevcp bug
+  * increase stepgen to 16 Signed-off-by: John Thornton
+  * Revert "add latency histogram to the main menu"
+  * Revert "Menu: add latency histogram"
+  * Menu: add latency histogram
+  * add latency histogram to the main menu
+  * Docs: add info about kernel
+  * glcanon.py is_lathe() is a function
+  * hm2_eth: note the irq-coalesce trick
+  * fix comments describing HAL thread & funct times
+  * Docs: fix information about opening a terminal. add links to the info
+  * GladeVCP - SpeedControl - forgot to push this file
+  * GladeVCP - SpeedControl - added widget icon
+  * motion: fix motion.servo.last-period
+  * Docs: add info about non network updates
+  * build: make failure copying images an error
+  * docs: fix build error
+  * interp: fix build error on Ubuntu 16.04
+  * GladeVCP - New Widget SpeedControl - Adjustment for Touch Screen
+  * Revert "Docs: add info about helper scripts"
+  * gremlin: fix build error
+  * Docs: update location of the iso files. Some people with older hardware
+      may need to restore with older versions of EMC2
+  * Docs: update location of iso files some people with old hardware may
+      need to restore with older versions of EMC2.
+  * Docs: remove chapter covered in manual pages. I need to rethink how to
+      cover the manual pages in the installed docs
+  * Docs: add info about helper scripts
+  * interp: don't return potentially stacked data
+  * interp: fix build error on Ubuntu 16.04
+  * GladevCP - gremlin - bugfix - mouse mode 6
+  * gmoccapy_1_5_6_2 - bugfix caused due to rests of alarm page
+  * stepconf: fix default pitch for a axis
+  * stepconf: dynamically show how step scale is calculated
+  * motion: remove heuristic delay warning
+  * docs: give up in disgust about documenting udev rules syntax
+  * Add support for 5i24 in PnCConf
+  * docs: remove outdated information
+  * gantry: fix typo in docs
+  * docs: fix typo in getting started guide
+  * pncconf: fix gui's jog default settings
+  * pncconf: fix user created stepper names error.
+  * pncconf: fix halui cmnds error
+  * dpkg: Interfacing with the initscript system from 
+      https://www.debian.org/doc/debian-policy/ch-opersys.html#s9.3.3 
+      Maintainers should use the abstraction layer provided by the 
+      update-rc.d and invoke-rc.d programs to deal with initscripts in 
+      their packages' scripts such as postinst, prerm and postrm.
+      Directly  managing the /etc/rc?.d links and directly invoking the
+      /etc/init.d/  initscripts should be done only by packages
+      providing the initscript  subsystem (such as sysv-rc and file-rc).
+      This fixed an issue when  installing on linuxmint
+  * Docs: fix command to add a deb
+  * linuxcncrsh man page, remove wrong note
+  * wj200: warn on unhandled command-line arguments
+  * Docs: add more info on compare and groups
+  * xhc-hb04.tcl: accomodate prior connect of this pin:
+  * pyngcgui.py remove --help mention of --height
+  * pncconf: fix spindle feedback signal error - missing components
+  * pncconf: fix spindle display not working with encoder
+  * Docs: add info about editing a config
+  * pncconf: fix wrong inverted step/direction pin
+  * pncconf: fix axis tests with invert step/pwm pins
+  * pncconf: PID P calculation was wrong for steppers
+  * pncconf -set PID P to a better default for stepper systems
+  * pncconf -fix error when selecting both-home-x or y or
 
- -- Moses McKnight <moses@texband.net>  Thu, 24 Mar 2016 14:09:38 -0500
+ -- Moses McKnight <moses@texband.net>  Thu, 02 Jun 2016 17:58:03 -0500
 
 linuxcnc (1:2.7.4) unstable; urgency=medium
 
