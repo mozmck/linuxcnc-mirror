@@ -1,3 +1,9 @@
+linuxcnc (1:2.7.4~ccc1.4) trusty; urgency=low
+
+  * Add dual_probe.comp for probing with two inputs - one having an offset.
+
+ -- Moses McKnight <moses@candcnc.com>  Wed, 08 Jun 2016 08:14:15 -0500
+
 linuxcnc (1:2.7.4~ccc1.3) trusty; urgency=low
 
   * Add oxyfuel.comp, thcenable.comp, improved error reporting. ~ccc1.2
@@ -90,7 +96,7 @@ linuxcnc (1:2.7.4~ccc1.3) trusty; urgency=low
   * pncconf -set PID P to a better default for stepper systems
   * pncconf -fix error when selecting both-home-x or y or
 
- -- Moses McKnight <moses@texband.net>  Thu, 02 Jun 2016 17:58:03 -0500
+ -- Moses McKnight <moses@candcnc.com>  Thu, 02 Jun 2016 17:58:03 -0500
 
 linuxcnc (1:2.7.4) unstable; urgency=medium
 
