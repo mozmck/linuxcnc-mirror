@@ -1,3 +1,9 @@
+linuxcnc (1:2.7.4~ccc1.5) trusty; urgency=low
+
+  * Added gremlin-file-loaded signal to hal_gremlin
+
+ -- Moses McKnight <moses@candcnc.com>  Tue, 02 Aug 2016 14:41:56 -0500
+
 linuxcnc (1:2.7.4~ccc1.4) trusty; urgency=low
 
   * Add dual_probe.comp for probing with two inputs - one having an offset.
