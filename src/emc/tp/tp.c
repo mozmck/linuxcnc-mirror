@@ -429,8 +429,6 @@ int tpClear(TP_STRUCT * const tp)
     tp->nextId = 0;
     tp->execId = 0;
     tp->motionType = 0;
-    tp->termCond = TC_TERM_COND_PARABOLIC;
-    tp->tolerance = 0.0;
     tp->done = 1;
     tp->depth = tp->activeDepth = 0;
     tp->aborting = 0;
@@ -471,6 +469,9 @@ int tpInit(TP_STRUCT * const tp)
     tp->spindle.revs = 0.0;
     tp->spindle.waiting_for_index = MOTION_INVALID_ID;
     tp->spindle.waiting_for_atspeed = MOTION_INVALID_ID;
+
+    tp->termCond = TC_TERM_COND_PARABOLIC;
+    tp->tolerance = 0.0;
 
     ZERO_EMC_POSE(tp->currentPos);
 
