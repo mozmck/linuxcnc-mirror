@@ -373,6 +373,7 @@ class GlCanonDraw:
         'axis_y': (1.00, 0.20, 0.20),
         'grid': (0.15, 0.15, 0.15),
     }
+    toolstyle = 0
     def __init__(self, s, lp, g=None):
         self.stat = s
         self.lp = lp
@@ -1143,7 +1144,7 @@ class GlCanonDraw:
                         cone_scale = max(g.max_extents[x] - g.min_extents[x],
                                        g.max_extents[y] - g.min_extents[y],
                                        g.max_extents[z] - g.min_extents[z],
-                                       2 ) * .5
+                                       2 ) * .35
                     else:
                         cone_scale = 1
                     if self.is_lathe():
@@ -1493,17 +1494,31 @@ class GlCanonDraw:
         glEndList()
 
     def make_cone(self, n):
-        q = gluNewQuadric()
-        glNewList(n, GL_COMPILE)
-        glEnable(GL_LIGHTING)
-        gluCylinder(q, 0, .1, .25, 32, 1)
-        glPushMatrix()
-        glTranslatef(0,0,.25)
-        gluDisk(q, 0, .1, 32, 1)
-        glPopMatrix()
-        glDisable(GL_LIGHTING)
-        glEndList()
-        gluDeleteQuadric(q)
+        if self.toolstyle:
+            glNewList(n, GL_COMPILE)
+            glLineWidth(2.5)
+            glBegin(GL_LINES)
+            glVertex3f(0.5,0.0,0.1)
+            glVertex3f(-0.5,0.0,0.1)
+            glEnd()
+            glBegin(GL_LINES)
+            glVertex3f(0.0,-0.5,0.1)
+            glVertex3f(0.0,0.5,0.1)
+            glEnd()
+            glLineWidth(1)
+            glEndList()
+        else:
+            q = gluNewQuadric()
+            glNewList(n, GL_COMPILE)
+            glEnable(GL_LIGHTING)
+            gluCylinder(q, 0, .1, .25, 32, 1)
+            glPushMatrix()
+            glTranslatef(0,0,.25)
+            gluDisk(q, 0, .1, 32, 1)
+            glPopMatrix()
+            glDisable(GL_LIGHTING)
+            glEndList()
+            gluDeleteQuadric(q)
 
 
     lathe_shapes = [
