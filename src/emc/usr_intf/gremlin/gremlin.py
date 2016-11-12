@@ -58,6 +58,7 @@ import os
 import sys
 
 import thread
+import ast
 
 from minigl import *
 
@@ -90,6 +91,9 @@ class Gremlin(gtk.gtkgl.widget.DrawingArea, glnav.GlNavBase,
 
         gtk.gtkgl.widget.DrawingArea.__init__(self, glconfig)
         glnav.GlNavBase.__init__(self)
+        self.colorfile = inifile.find("DISPLAY", "GREMLIN_COLORS_FILE")
+        if (self.colorfile):
+            self.load_colors()
         def C(s):
             a = self.colors[s + "_alpha"]
             s = self.colors[s]
@@ -170,6 +174,12 @@ class Gremlin(gtk.gtkgl.widget.DrawingArea, glnav.GlNavBase,
         gldrawable = gtk.gtkgl.widget_get_gl_drawable(self)
 
         return gldrawable and glcontext and gldrawable.gl_begin(glcontext)
+
+    def load_colors(self):
+        with open(self.colorfile,'r') as inf:
+            #ast.literal_eval() is used because it's more secure than eval(),
+            #but you cannot have equations in the colors such as 1/3.  Just use 0.3333 etc.
+            self.colors = ast.literal_eval(inf.read())
 
     def swapbuffers(self):
         gldrawable = gtk.gtkgl.widget_get_gl_drawable(self)
