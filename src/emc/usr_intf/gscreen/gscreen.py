@@ -4398,7 +4398,8 @@ class Gscreen:
             elif kind in (linuxcnc.NML_TEXT, linuxcnc.OPERATOR_TEXT):
                 self.notify(_("Message"),text,INFO_ICON,3)
             elif kind in (linuxcnc.NML_DISPLAY, linuxcnc.OPERATOR_DISPLAY):
-                self.notify(_("Message"),text,INFO_ICON,3)
+                #self.notify(_("Message"),text,INFO_ICON,3)
+                self.warning_dialog(text, 1)
         self.emc.unmask()
         if "periodic" in dir(self.handler_instance):
             self.handler_instance.periodic()
