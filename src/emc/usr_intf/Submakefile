@@ -10,6 +10,7 @@ EMCLCDSRCS := emc/usr_intf/emclcd.cc \
               emc/usr_intf/sockets.c
 
 HALUISRCS := emc/usr_intf/halui.cc
+HALUI2SRCS := emc/usr_intf/halui2.cc
 ifeq "$(HAVE_NCURSES)" "yes"
 KEYSTICKSRCS := emc/usr_intf/keystick.cc
 endif
@@ -17,7 +18,7 @@ ifeq "$(HAVE_XAW)" "yes"
 XEMCSRCS := emc/usr_intf/xemc.cc
 endif
 
-USERSRCS += $(EMCSHSRCS) $(EMCRSHSRCS) $(EMCSCHEDSRCS) $(EMCLCDSRCS) $(USRMOTSRCS) $(HALUISRCS) $(KEYSTICKSRCS)
+USERSRCS += $(EMCSHSRCS) $(EMCRSHSRCS) $(EMCSCHEDSRCS) $(EMCLCDSRCS) $(USRMOTSRCS) $(HALUISRCS) $(HALUI2SRCS) $(KEYSTICKSRCS)
 
 ifeq "$(HAVE_NCURSES)" "yes"
 USERSRCS += $(KEYSTICKSRCS)
@@ -53,6 +54,11 @@ TARGETS += ../bin/linuxcnclcd
 	$(ECHO) Linking $(notdir $@)
 	$(Q)$(CXX) $(LDFLAGS) -o $@ $(ULFLAGS) $^ 
 TARGETS += ../bin/halui
+
+../bin/halui2: $(call TOOBJS, $(HALUI2SRCS)) ../lib/liblinuxcnc.a ../lib/liblinuxcncini.so.0 ../lib/libnml.so.0 ../lib/liblinuxcnchal.so.0
+	$(ECHO) Linking $(notdir $@)
+	$(Q)$(CXX) $(LDFLAGS) -o $@ $(ULFLAGS) $^ 
+TARGETS += ../bin/halui2
 
 ifeq "$(HAVE_NCURSES)" "yes"
 ../bin/keystick: $(call TOOBJS, $(KEYSTICKSRCS)) ../lib/liblinuxcnc.a ../lib/libnml.so.0 ../lib/liblinuxcncini.so.0
