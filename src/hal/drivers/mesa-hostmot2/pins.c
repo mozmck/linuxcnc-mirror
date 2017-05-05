@@ -403,7 +403,7 @@ int hm2_read_pin_descriptors(hostmot2_t *hm2) {
             case 17:    /* 25 pin 17 I/O parallel port type cards funny DB25 order */
                 pin->port_pin = DB25[i % 17];
                 break;
-            case 23:
+            case 28:    /* EBOB */
             case 32:      /* 5I21 punt on this for now */
                 pin->port_pin = i + 1;
                 break;
