@@ -884,7 +884,7 @@ static int hm2_eth_probe(hm2_eth_t *board) {
         llio_name[2] = tolower(llio_name[2]);
         llio_name[3] = tolower(llio_name[3]);
         board->llio.num_ioport_connectors = 2;
-        board->llio.pins_per_connector = 23;
+        board->llio.pins_per_connector = 28;
         board->llio.ioport_connector_name[0] = "P2";
         board->llio.ioport_connector_name[1] = "P1";
         board->llio.fpga_part_number = "XC6SLX9";
