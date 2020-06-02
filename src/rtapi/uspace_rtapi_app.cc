@@ -52,7 +52,29 @@
 #include <sys/shm.h>		/* shmget() */
 #include <string.h>
 
-int WithRoot::level;
+std::atomic<int> WithRoot::level;
+static uid_t euid, ruid;
+
+//#include "rtapi/uspace_common.h"
+
+WithRoot::WithRoot() {
+    if(!level++) {
+#ifdef __linux__
+        setfsuid(euid);
+#endif
+    }
+}
+
+WithRoot::~WithRoot() {
+    if(!--level) {
+#ifdef __linux__
+        setfsuid(ruid);
+#endif
+    }
+}
+
+extern "C"
+int rtapi_is_realtime();
 
 namespace
 {
@@ -444,7 +466,12 @@ int main(int argc, char **argv) {
             "Running with fallback_uid.  getuid()=%d geteuid()=%d\n",
             getuid(), geteuid());
     }
-    setfsuid(getuid());
+    ruid = getuid();
+    euid = geteuid();
+    setresuid(euid, euid, ruid);
+#ifdef __linux__
+    setfsuid(ruid);
+#endif
     vector<string> args;
     for(int i=1; i<argc; i++) { args.push_back(string(argv[i])); }
 
@@ -657,9 +684,7 @@ static int harden_rt()
     int fd = open("/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         rtapi_print_msg(RTAPI_MSG_WARN, "failed to open /dev/cpu_dma_latency: %s\n", strerror(errno));
-    }
-    setfsuid(getuid());
-    if(fd >= 0) {
+    } else {
         int r;
         r = write(fd, "\0\0\0\0", 4);
         if (r != 4) {
@@ -673,14 +698,14 @@ static int harden_rt()
 
 static RtapiApp *makeApp()
 {
-    if(harden_rt() < 0)
+    if(euid != 0 || harden_rt() < 0)
     {
         rtapi_print_msg(RTAPI_MSG_ERR, "Note: Using POSIX non-realtime\n");
         return new Posix(SCHED_OTHER);
-    } else {
-        rtapi_print_msg(RTAPI_MSG_ERR, "Note: Using POSIX realtime\n");
-        return new Posix(SCHED_FIFO);
     }
+    WithRoot r;
+    rtapi_print_msg(RTAPI_MSG_ERR, "Note: Using POSIX realtime\n");
+    return new Posix(SCHED_FIFO);
 }
 RtapiApp &App()
 {
