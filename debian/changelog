@@ -1,3 +1,74 @@
+linuxcnc (1:2.7.14.6~ccc2.3) stable; urgency=medium
+
+  * gantry.comp: only stop joints if homing
+  * hm2_eth: fix permissions to run iptables etc.
+
+ -- Moses McKnight <moses@candcnc.com>  Tue, 02 Jun 2020 15:23:29 -0500
+
+linuxcnc (1:2.7.14.6~ccc2.2) stable; urgency=medium
+
+  * Update to support EBOB-01 REV 0.4 boards
+  * Updated EBOB-01 support for REV 0.3 boards
+  * Added halui2.cc which is a fork of halui to add jogging features
+  * Gscreen: make (MSG, text) messages show in OK dialog
+  * Gremlin: added cross-hair tool, changed tool scaling factor.
+  * Gremlin: load colors from external file specified in INI file.
+  * Fix G64 tolerance getting reset on E-stop
+  * Added support for the EBOB-01
+  * Added gremlin-file-loaded signal to HAL_Gremlin
+  * Add dual_probe.comp for probing with two inputs - one having an offset.
+  * Add oxyfuel.comp, thcenable.comp, improved error reporting. ~ccc1.2
+  * Teach motion-logger about the new message, and fix tests accordingly
+  * Added ini settings to disable probe errors while jogging and homing.
+  * Add simple-run-from-line command, which simply starts at line given
+  * ------------Items above this are my commits for CommandCNC------------
+  * Fix motion after abort from Rob Ellenberg - fixes #579
+  * Merge pull request #623 from LinuxCNC/remove-yapps
+  * packaging: let debian/configure be explicit about the yapps runtime
+  * remove our copy of yapps, we can rely on packaged yapps now
+  * process halcompile with the packaged yapps, not our own copy
+  * build-depend on yapps
+  * halcompile: move yapps preparser code to after the parser itself
+  * halcompile: switch from py2-style print to py3-style print_function
+  * packaging: Buster needs asciidoc-dblatex to build docs
+  * gladevcp -fix error when ensuring linuxcnc is in MDI
+  * gscreen -remove debugging code
+  * Issue #394 BUGFIX: hm2 muxed encoder skew drift due to integer division
+      truncating converted to rounding. This affects changing the muxed
+      encoder skew value when other encoder parameters are changed.
+  * BUGFIX: hostmot2 encoder quadrature error reporting bug. Previous to
+      this patch the quadrature errors were not reported correctly and
+      could be lost.
+  * sserial,c: Don't report "remote error" as the error when there is a
+      remote error https://github.com/LinuxCNC/linuxcnc/issues/439
+  * gladevcp -fix a missed update from long ago.
+  * Merge pull request #603 from manymachines/doc-ok_for_mdi
+  * Merge pull request #604 from sleepybishop/vismach_stl_import_bug-2.7
+  * fix undefined variables causing some stl imports to fail in
+      lib/python/vismach.py
+  * The example Python function ok_for_mdi() attempts to check that the
+      machine is homed before returning True.  The homed attribute
+      returns a tuple of length 9 with home status of each axis.  The
+      current example will always return True for the homed test even if
+      all axes are unhomed.
+  * Docs: minor fix
+  * Merge pull request #600 from JetForMe/2.7
+  * Changed an instance of HOME_FINAL to HOME_FINAL_VEL
+  * debian/configure: oops, Debian Buster isn't released yet
+  * Merge remote-tracking branch 'origin/2.7-buster' into 2.7
+  * fix some compiler warnings in libnml
+  * debian buster packaging: use correct package names for python imaging
+      debs
+  * let debian/configure specify python-imaging and python-imaging-tk
+      package names
+  * debian/configure: Debian-testing will become Debian-10
+  * packaging: don't depend on python-gnome2
+  * remove unused program halgui
+  * hy_gy_vfd: fix modbus byte timeout
+  * mb2hal: add support for libmodbus 3.1.2 and newer
+
+ -- Moses McKnight <moses@candcnc.com>  Fri, 02 Aug 2019 17:57:02 -0500
+
 linuxcnc (1:2.7.14) unstable; urgency=medium
 
   * docs: improve motion.requested-vel description
