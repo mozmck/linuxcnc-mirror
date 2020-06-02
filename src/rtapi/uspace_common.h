@@ -19,6 +19,9 @@
 #include <sys/utsname.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #include <rtapi_errno.h>
 #include <rtapi.h>
 
@@ -28,6 +31,12 @@ static int msg_level = RTAPI_MSG_ERR;	/* message printing level */
 #include <sys/shm.h>		/* shmget() */
 /* These structs hold data associated with objects like tasks, etc. */
 /* Task handles are pointers to these structs.                      */
+
+#include "config.h"
+
+//#ifdef RTAPI
+//#include "rtapi_uspace.hh"
+//#endif
 
 typedef struct {
   int magic;			/* to check for valid handle */
@@ -46,6 +55,9 @@ static rtapi_shmem_handle shmem_array[MAX_SHM] = {{0},};
 
 int rtapi_shmem_new(int key, int module_id, unsigned long int size)
 {
+#ifdef RTAPI
+  WITH_ROOT;
+#endif
   rtapi_shmem_handle *shmem;
   int i;
 
@@ -64,7 +76,7 @@ int rtapi_shmem_new(int key, int module_id, unsigned long int size)
   shmem = &shmem_array[i];
 
   /* now get shared memory block from OS */
-  shmem->id = shmget((key_t) key, (int) size, IPC_CREAT | 0666);
+  shmem->id = shmget((key_t) key, (int) size, IPC_CREAT | 0600);
   if (shmem->id == -1) {
     rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_shmem_new failed due to shmget(key=0x%08x): %s\n", key, strerror(errno));
     return -errno;
@@ -74,13 +86,29 @@ int rtapi_shmem_new(int key, int module_id, unsigned long int size)
   int res = shmctl(shmem->id, IPC_STAT, &stat);
   if(res < 0) perror("shmctl IPC_STAT");
 
-  if(geteuid() == 0 && getuid() != 0) {
-    stat.shm_perm.uid = getuid();
+#ifdef RTAPI
+  /* ensure the segment is owned by user, not root */
+  if(geteuid() == 0) {
+    stat.shm_perm.uid = ruid;
+    res = shmctl(shmem->id, IPC_SET, &stat);
+    if(res < 0) perror("shmctl IPC_SET");
   }
 
-  stat.shm_perm.mode |= SHM_LOCKED;
-  res = shmctl(shmem->id, IPC_SET, &stat);
-  if(res < 0) perror("shmctl IPC_SET");
+#ifndef __FreeBSD__ // FreeBSD doesn't implement SHM_LOCK
+  if(rtapi_is_realtime())
+  {
+    /* ensure the segment is locked */
+    res = shmctl(shmem->id, SHM_LOCK, NULL);
+    if(res < 0) perror("shmctl IPC_LOCK");
+
+    res = shmctl(shmem->id, IPC_STAT, &stat);
+    if(res < 0) perror("shmctl IPC_STAT");
+    if((stat.shm_perm.mode & SHM_LOCKED) != SHM_LOCKED)
+      rtapi_print_msg(RTAPI_MSG_ERR,
+          "shared memory segment not locked as requested\n");
+  }
+#endif
+#endif
 
   /* and map it into process space */
   shmem->mem = shmat(shmem->id, 0, 0);

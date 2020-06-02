@@ -150,7 +150,7 @@ static bool chain_exists() {
 static int iptables_state = -1;
 static bool use_iptables() {
     if(iptables_state == -1) {
-        if(geteuid() != 0) return (iptables_state = 0);
+//        if(geteuid() != 0) return (iptables_state = 0);
         if(!chain_exists()) {
             int res = shell("/sbin/iptables -N " CHAIN);
             if(res != EXIT_SUCCESS) {
@@ -546,12 +546,12 @@ static int hm2_eth_receive_queued_reads(hm2_lowlevel_io_t *this) {
         board->comm_error_counter = 0;
     }
 
-    long read_timeout = board->hal ? board->hal->read_timeout : 800000;
-    if(read_timeout <= 0)
+    long read_timeout = board->hal ? board->hal->read_timeout : 1600000;
+    if(read_timeout <= 0)//less than or equal to 0, use 80% of the thread period.
         read_timeout = 80;
-    if(read_timeout < 100)
+    if(read_timeout < 100)//less than 100 is interpreted as a percentage of the thread period.
         read_timeout = rtapi_div_s64(read_timeout * (unsigned long long)board->llio.period, 100);
-    if(read_timeout < 100000)
+    if(read_timeout < 100000)//Interpret as nanoseconds
         read_timeout = 100000;
  
     if(!board->hal) this->read_time = t1;
