@@ -46,6 +46,7 @@ pin out float joint.##.offset  [7 : personality] "(debugging) Per-joint offset v
 pin in  float position-cmd "Commanded position from motion";
 pin out float position-fb "Position feedback to motion";
 pin out bit   home "Combined home signal, true if all joint home inputs are true";
+pin in  bit   homing "Input signal to indicate that this axis is homing";
 pin out bit   limit "Combined limit signal, true if any joint home input is true";
 pin in  float search-vel "HOME_SEARCH_VEL from ini file";
 function read  fp "Update position-fb and home/limit outputs based on joint values";
@@ -110,7 +111,7 @@ FUNCTION(read) {
     // track active joints or motion gets upset with the sudden
     // stop.  If all joints are not homed, but the current joint used
     // for feedback is, find a joint that's still active
-    if ((joint_home(fb_joint) == 1) && (home == 0)) {
+    if ( (joint_home(fb_joint) == 1) && (home == 0) && (homing == 1) ) {
         for (i=0; i < personality; i++) {
             if (joint_home(i) == 0) {
                 position_fb = joint_pos_fb(i) + offset[i];
@@ -140,8 +141,8 @@ FUNCTION(write) {
     // indicate we are moving towards home.  Otherwise, the result will be
     // zero or negative.
     //
-    // If we're moving towards home and all home switches are not closed
-    if ( ((delta * search_vel) > 0) && (home==0) ) {
+    // If we're moving towards home and all home switches are not closed, and this axis is in a homing move...
+    if ( ((delta * search_vel) > 0) && (home==0) && (homing == 1) ) {
         // Check each joint to see if it's home switch is active
         for (i=0; i < personality; i++) {
             // If home switch is active, update offset, not pos_cmd
