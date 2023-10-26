@@ -1190,6 +1190,19 @@ static int hm2_eth_probe(hm2_eth_t *board) {
         board->llio.ioport_connector_name[1] = "P1";
         board->llio.fpga_part_number = "XC6SLX9";
         board->llio.num_leds = 4;
+    } else if (strncmp(board_name, "EBOB-01", 7) == 0) {
+        strncpy(llio_name, board_name, 4);
+        llio_name[0] = tolower(llio_name[0]);
+        llio_name[1] = tolower(llio_name[1]);
+        llio_name[2] = tolower(llio_name[2]);
+        llio_name[3] = tolower(llio_name[3]);
+
+        board->llio.num_ioport_connectors = 2;
+        board->llio.pins_per_connector = 28;
+        board->llio.ioport_connector_name[0] = "P1";
+        board->llio.ioport_connector_name[1] = "P2";
+        board->llio.fpga_part_number = "XC6SLX9";
+        board->llio.num_leds = 4;
     } else if (strncmp(board_name, "7I92T", 5) == 0) {
         strncpy(llio_name, board_name, 4);
         llio_name[1] = tolower(llio_name[1]);
