@@ -1,0 +1,62 @@
+// This component is for enabling/disabling the CandCNC THC
+// THC can be disabled by any of three input pin, or when motion.current_vel
+// drops below the given percentage of motion.requested_vel
+
+component thcenable "Turn off output when disabled, or when current-vel < percentage of requested-vel";
+
+author "Moses McKnight";
+license "GPLv2 or greater";
+option singleton yes;
+
+pin in float current_vel "Value being compared - motion.current-vel";
+pin in float requested_vel "Reference value - motion.requested-vel";
+pin in signed percent "Percentage of requested-vel, must be between 0 and 100";
+pin in bit enable "If true, the cornerlock logic is enabled.  External disables always work.";
+pin in bit prog_is_idle "connect to halui.program.is-idle";
+pin in bit extdisable0 "External disable pin: connected to motion.digital-out-xx and controlled from gcode.";
+pin in bit extdisable1 "External disable pin: connected to GUI hal pin for manual disable.";
+pin in bit extdisable2 "External disable pin: extra pin - maybe for pendant?";
+
+pin out bit out "Output: true to enable THC, false to disable";
+
+// debug pins
+//pin out float d_m;
+//pin out float d_diff;
+
+param rw float hyst=0.0 "Hysteresis of the comparator (default 0.0)";
+
+
+// Global Variables
+//variable double m;
+variable double diff;
+variable double halfhyst;
+
+
+function _ fp "Update output based on inputs";
+
+;;
+
+FUNCTION(_) {
+    if (extdisable0 || extdisable1 || extdisable2)  //always disable for external disable pins
+    {
+        out = 0;
+    }
+	else if (enable && !prog_is_idle) // && (requested_vel > 0.0))
+	{
+		//m = percent / 100.0;
+		//d_m = m;
+		diff = current_vel - (requested_vel * percent)/100.0;
+		//d_diff = diff;
+		halfhyst = 0.5 * hyst;
+        if (diff < -halfhyst) {
+            out = 0;
+        } else if(diff > halfhyst){
+            out = 1;
+        }
+    }
+    else
+    {
+        out = 1; //enable by default
+    }
+}
+

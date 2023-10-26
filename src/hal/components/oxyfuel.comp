@@ -1,0 +1,91 @@
+// Oxy-fuel component for moving Z manually while code is running.
+component oxyfuel "Oxy-fuel Z Control Up/Down Input";
+
+description 
+"""
+Oxy-fuel manual axis control
+This takes either an up or a down input and moves the axis (normally Z) accordingly.
+
+If enabled and torch is off and the Z axis is moving up remove any correction
+at a rate not to exceed the rate of movement of the Z axis.
+
+If enabled and torch is off and there is no correction 
+pass the Z position and feed back untouched.
+
+If not enabled pass the Z position and feed back untouched.
+
+Sample Physical Connections using a Parallel Port
+.br
+Parallel Pin 12 <= switch input to move torch Up
+.br
+Parallel Pin 13 <= switch input to move torch Down
+.br
+Parallel Pin 16 => Oxy-fuel Torch Start Relay
+
+HAL Plasma Connections
+.br
+net torch-up thc.up0 <= parport.0.pin-12-in
+.br
+net torch-down thc.down0 <= parport.0.pin-13-in
+.br
+net torch-on motion.spindle-on => parport.0.pin-16-out (start the arc)
+
+
+""";
+ 
+author "Moses McKnight, based on thcud component by John Thornton";
+
+license "GPLv2 or greater";
+
+option singleton yes;
+
+// Input Pins
+pin in bit up0 "Connect to an input pin";
+pin in bit up1 "Connect to an input pin";
+pin in bit up2 "Connect to an input pin";
+pin in bit down0 "Connect to input pin";
+pin in bit down1 "Connect to input pin";
+pin in bit down2 "Connect to input pin";
+pin in bit torch_on "Connect to motion.spindle-on";
+pin in bit enable "If not enabled up/down signals are ignored";
+pin in float z_pos_in "Z Motor Position Command in from axis.n.motor-pos-cmd";
+pin in float correction_vel "Velocity in units-per-second to move Z";
+
+// Output Pins
+pin out float z_pos_out "Z Motor Position Command Out";
+pin out float z_fb_out "Z Position Feedback to Axis";
+//pin out float cur_offset "The Current Offset";
+//pin out bit removing_offset "Pin for testing";
+
+
+// Global Variables
+variable float offset;
+variable float last_z_in;
+
+function _ fp;
+
+;;
+
+#include "rtapi_math.h"
+
+FUNCTION(_) {
+    double correction = correction_vel * fperiod;
+    if(enable){
+        if(torch_on){ // allow correction
+            if(down0 || down1 || down2){
+                offset -= correction;
+            }
+            if(up0 || up1 || up2){
+                offset += correction;
+            }    
+            last_z_in = 0;
+        }
+        z_pos_out = z_pos_in + offset;
+        z_fb_out = z_pos_in; // keep axis motor position fb from being confused
+    }
+    else{
+        z_pos_out = z_pos_in;
+        z_fb_out = z_pos_in; // keep axis motor position fb from being confused
+    }
+}
+

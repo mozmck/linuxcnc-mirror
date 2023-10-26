@@ -1,0 +1,32 @@
+// dual_probe component takes two inputs and outputs if either is true.
+// If the "floating" input caused the output to go true, "offset" will be true.
+// This allows a dual switch probe for the CandCNC THC setup.  The first input
+// is from the ohmic sensor, and the second from the floating head switch.
+// If the ohmic sense fails (because of rusty metal etc), then when the floating head
+// switch trips the output is set to true, but a switch offset needs to be applied.
+// So the O subroutine that does touchoff should read the "offset" pin after a successful
+// probe, and if true, apply a switch offset, and if false, do not apply the offset.
+
+component dual_probe "Two-input OR gate with offset output to show which input tripped";
+
+author "Moses McKnight";
+license "GPLv2 or greater";
+
+pin in bit ohmic;
+pin in bit floating;
+pin out bit out;
+pin out bit offset;
+
+
+function _ nofp;
+
+;;
+FUNCTION(_) {
+	if (floating) {
+		offset = 1;
+	}
+	else {
+		offset = 0;
+	}
+	out = ohmic || floating;
+}
