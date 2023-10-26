@@ -63,6 +63,7 @@ class HAL_Gremlin(gremlin.Gremlin, _EMC_ActionBase):
     __gsignals__ = {
         'line-clicked': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_INT,)),
         'gcode_error': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_STRING,)),
+        'gremlin-file-loaded': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, ())
     }
 
     __gproperties__ = {
@@ -151,6 +152,8 @@ class HAL_Gremlin(gremlin.Gremlin, _EMC_ActionBase):
                #AttributeError: 'NoneType' object has no attribute 'gl_end'
             print('hal_gremlin: continuing after',detail)
         self.gstat.emit('graphics-gcode-properties',self.gcode_properties)
+        self.emit('gremlin-file-loaded')
+
 
     def do_get_property(self, property):
         name = property.name.replace('-', '_')
