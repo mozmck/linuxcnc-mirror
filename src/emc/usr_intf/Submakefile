@@ -10,8 +10,9 @@ EMCLCDSRCS := emc/usr_intf/emclcd.cc \
               emc/usr_intf/sockets.c
 
 HALUISRCS := emc/usr_intf/halui.cc
+HALUI2SRCS := emc/usr_intf/halui2.cc
 
-USERSRCS += $(EMCSHSRCS) $(EMCRSHSRCS) $(EMCSCHEDSRCS) $(EMCLCDSRCS) $(USRMOTSRCS) $(HALUISRCS)
+USERSRCS += $(EMCSHSRCS) $(EMCRSHSRCS) $(EMCSCHEDSRCS) $(EMCLCDSRCS) $(USRMOTSRCS) $(HALUISRCS) $(HALUI2SRCS)
 
 $(call TOOBJSDEPS, $(EMCSHSRCS)) : EXTRAFLAGS = $(ULFLAGS) $(TCL_CFLAGS) -fPIC
 
@@ -39,3 +40,8 @@ TARGETS += ../bin/linuxcnclcd
 	$(ECHO) Linking $(notdir $@)
 	$(Q)$(CXX) $(CXXFLAGS) -o $@ $(ULFLAGS) $^ $(LDFLAGS)
 TARGETS += ../bin/halui
+
+../bin/halui2: $(call TOOBJS, $(HALUISRCS)) ../lib/liblinuxcnc.a ../lib/liblinuxcncini.so.0 ../lib/libnml.so.0 ../lib/liblinuxcnchal.so.0 ../lib/libtooldata.so.0
+	$(ECHO) Linking $(notdir $@)
+	$(Q)$(CXX) $(CXXFLAGS) -o $@ $(ULFLAGS) $^ $(LDFLAGS)
+TARGETS += ../bin/halui2
