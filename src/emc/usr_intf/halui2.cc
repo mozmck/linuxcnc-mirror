@@ -1445,13 +1445,12 @@ static int iniLoad(const char *filename)
     if(inifile.Find(&maxMaxVelocity, "MAX_LINEAR_VELOCITY", "TRAJ") &&
        inifile.Find(&maxMaxVelocity, "MAX_VELOCITY", "AXIS_X"))
         maxMaxVelocity = 1.0;
-    std::string axstr[] = { "AXIS_X", "AXIS_Y", "AXIS_Z", "AXIS_A", "AXIS_B", "AXIS_C", "AXIS_U", "AXIS_V", "AXIS_W" };
-    for (int x=0; x<EMCMOT_MAX_AXIS+1; ++x)
+    const char* axstr[EMCMOT_MAX_AXIS] = { "AXIS_X", "AXIS_Y", "AXIS_Z", "AXIS_A", "AXIS_B", "AXIS_C", "AXIS_U", "AXIS_V", "AXIS_W" };
+    for (int x=0; x<EMCMOT_MAX_AXIS; ++x)
     {
-        if (inifile.Find(&maxAxisVelocity[x], "MAX_VELOCITY", axstr[x].c_str()))
+        if (inifile.Find(&maxAxisVelocity[x], "MAX_VELOCITY", axstr[x]))
             maxAxisVelocity[x] = 1.0;
     }
-
 
     if (NULL != (inistring = inifile.Find("MIN_SPINDLE_OVERRIDE", "DISPLAY"))) {
 	if (1 == sscanf(inistring, "%lf", &d) && d > 0.0) {
