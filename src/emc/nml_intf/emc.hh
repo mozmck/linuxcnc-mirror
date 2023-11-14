@@ -169,6 +169,7 @@ struct PM_CARTESIAN;
 #define EMC_TASK_PLAN_OPTIONAL_STOP_TYPE             ((NMLTYPE) 519)
 #define EMC_TASK_PLAN_REVERSE_TYPE                   ((NMLTYPE) 520)
 #define EMC_TASK_PLAN_FORWARD_TYPE                   ((NMLTYPE) 521)
+#define EMC_TASK_PLAN_SIMPLE_RUN_TYPE                ((NMLTYPE) 522)
 
 #define EMC_TASK_STAT_TYPE                           ((NMLTYPE) 599)
 
