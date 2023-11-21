@@ -1168,7 +1168,7 @@ int Interp::convert_g7x(int mode,
 	    settings->current_z=real(end);
 	    start=end;
 	}
-	CHP(read());
+	CHP(read(0));
     }
     if(path.size()<=1)
 	return INTERP_OK;
