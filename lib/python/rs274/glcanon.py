@@ -477,6 +477,7 @@ class GlCanonDraw:
         'grid': (0.15, 0.15, 0.15),
         'limits': (1.0, 0.0, 0.0),
     }
+    toolstyle = 0
     def __init__(self, s=None, lp=None, g=None):
         self.stat = s
         self.lp = lp
@@ -1823,19 +1824,32 @@ class GlCanonDraw:
         glEndList()
 
     def make_cone(self, n):
-        q = gluNewQuadric()
-        glNewList(n, GL_COMPILE)
-        glBlendColor(0,0,0,self.colors['tool_alpha'])
-        glEnable(GL_LIGHTING)
-        gluCylinder(q, 0, .1, .25, 32, 1)
-        glPushMatrix()
-        glTranslatef(0,0,.25)
-        gluDisk(q, 0, .1, 32, 1)
-        glPopMatrix()
-        glDisable(GL_LIGHTING)
-        glEndList()
-        gluDeleteQuadric(q)
-
+        if (int(self.toolstyle) == 1):
+            glNewList(n, GL_COMPILE)
+            glLineWidth(2.5)
+            glBegin(GL_LINES)
+            glVertex3f(0.5,0.0,0.1)
+            glVertex3f(-0.5,0.0,0.1)
+            glEnd()
+            glBegin(GL_LINES)
+            glVertex3f(0.0,-0.5,0.1)
+            glVertex3f(0.0,0.5,0.1)
+            glEnd()
+            glLineWidth(1)
+            glEndList()
+        else:
+            q = gluNewQuadric()
+            glNewList(n, GL_COMPILE)
+            glBlendColor(0,0,0,self.colors['tool_alpha'])
+            glEnable(GL_LIGHTING)
+            gluCylinder(q, 0, .1, .25, 32, 1)
+            glPushMatrix()
+            glTranslatef(0,0,.25)
+            gluDisk(q, 0, .1, 32, 1)
+            glPopMatrix()
+            glDisable(GL_LIGHTING)
+            glEndList()
+            gluDeleteQuadric(q)
 
     lathe_shapes = [
         None,                           # 0

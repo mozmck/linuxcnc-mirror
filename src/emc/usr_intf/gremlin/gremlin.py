@@ -146,6 +146,7 @@ class Gremlin(Gtk.DrawingArea,rs274.glcanon.GlCanonDraw,glnav.GlNavBase):
         )
         _thread.start_new_thread(self.logger.start, (.01,))
 
+        self.toolstyle = (inifile.find("DISPLAY", "GREMLIN_TOOL_STYLE") or 0)
         rs274.glcanon.GlCanonDraw.__init__(self, linuxcnc.stat(), self.logger)
 
         self.current_view = 'z'
