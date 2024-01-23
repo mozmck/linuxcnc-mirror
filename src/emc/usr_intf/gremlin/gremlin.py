@@ -72,6 +72,7 @@ import shutil
 import os
 
 import _thread
+import ast
 
 class DummyProgress:
     def nextphase(self, unused): pass
@@ -130,6 +131,9 @@ class Gremlin(Gtk.DrawingArea,rs274.glcanon.GlCanonDraw,glnav.GlNavBase):
 
         Gtk.DrawingArea.__init__(self)
         glnav.GlNavBase.__init__(self)
+        self.colorfile = inifile.find("DISPLAY", "GREMLIN_COLORS_FILE")
+        if (self.colorfile):
+            self.load_colors()
         def C(s):
             a = self.colors[s + "_alpha"]
             s = self.colors[s]
@@ -225,6 +229,12 @@ class Gremlin(Gtk.DrawingArea,rs274.glcanon.GlCanonDraw,glnav.GlNavBase):
         if(not GLX.glXMakeCurrent(self.xdisplay, self.xwindow_id, self.context)):
             print("failed binding opengl context")
         return True
+
+    def load_colors(self):
+        with open(self.colorfile,'r') as inf:
+            #ast.literal_eval() is used because it's more secure than eval(),
+            #but you cannot have equations in the colors such as 1/3.  Just use 0.3333 etc.
+            self.colors = ast.literal_eval(inf.read())
 
     def swapbuffers(self):
         GLX.glXSwapBuffers(self.xdisplay, self.xwindow_id)
