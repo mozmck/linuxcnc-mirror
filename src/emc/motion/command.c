@@ -1902,7 +1902,9 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
             emcmotConfig->inhibit_probe_jog_error = emcmotCommand->probe_jog_err_inhibit;
             emcmotConfig->inhibit_probe_home_error = emcmotCommand->probe_home_err_inhibit;
             break;
-
+        case EMCMOT_SET_TELEOP_JOG_NO_HOME:
+            emcmotConfig->teleop_jog_before_home = emcmotCommand->teleop_jog_before_home;
+            break;
 	}			/* end of: command switch */
 	if (emcmotStatus->commandStatus != EMCMOT_COMMAND_OK) {
 	    rtapi_print_msg(RTAPI_MSG_DBG, "ERROR: %d",

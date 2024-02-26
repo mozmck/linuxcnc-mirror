@@ -2196,7 +2196,7 @@ static int emcTaskIssueCommand(NMLmsg * cmd)
 		// now queue up command to resynch interpreter
 		emcTaskQueueCommand(&taskPlanSynchCmd);
 	    }
-	    retval = emcTaskSetMode(mode_msg->mode);
+	    retval = emcTaskSetMode(mode_msg->mode, emcmotConfig.teleop_jog_before_home);
 	}
 	break;
 

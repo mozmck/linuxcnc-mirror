@@ -2122,6 +2122,12 @@ int emcSetProbeErrorInhibit(int j_inhibit, int h_inhibit) {
     return usrmotWriteEmcmotCommand(&emcmotCommand);
 }
 
+int emcSetTeleopJogBeforeHome(int t_jog) {
+    emcmotCommand.command = EMCMOT_SET_TELEOP_JOG_NO_HOME;
+    emcmotCommand.teleop_jog_before_home = t_jog;
+    return usrmotWriteEmcmotCommand(&emcmotCommand);
+}
+
 int emcGetExternalOffsetApplied(void) {
     return emcmotStatus.external_offsets_applied;
 }

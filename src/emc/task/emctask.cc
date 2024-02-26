@@ -262,7 +262,7 @@ int emcTaskAbort()
     return 0;
 }
 
-int emcTaskSetMode(int mode)
+int emcTaskSetMode(int mode, int tjogovrrd)
 {
     int retval = 0;
 
@@ -274,7 +274,7 @@ int emcTaskSetMode(int mode)
     switch (mode) {
     case EMC_TASK_MODE_MANUAL:
 	// go to manual mode
-        if (all_homed()) {
+        if (all_homed() || tjogovrrd) {
             emcTrajSetMode(EMC_TRAJ_MODE_TELEOP);
         } else {
             emcTrajSetMode(EMC_TRAJ_MODE_FREE);

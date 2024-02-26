@@ -34,7 +34,7 @@ int emcTaskInit();
 int emcTaskHalt();
 int emcTaskStateRestore();
 int emcTaskAbort();
-int emcTaskSetMode(int mode);
+int emcTaskSetMode(int mode, int tjogovrrd);
 int emcTaskSetState(int state);
 int emcTaskPlanInit();
 int emcTaskPlanSetWait();

@@ -251,6 +251,17 @@ static int loadTraj(EmcIniFile *trajInifile)
             }
             return -1;
         }
+        
+        int t_jog = 0;
+        trajInifile->Find(&t_jog, "TELEOP_JOG_BEFORE_HOMING", "TRAJ");
+        if (0 != emcSetTeleopJogBeforeHome(t_jog)) {
+            if (emc_debug & EMC_DEBUG_CONFIG) {
+                rcs_print("bad return value from emcSetTeleopJogBeforeHome\n");
+            }
+            return -1;
+        }
+
+        //teleop_jog_before_home
     }
 
     catch (EmcIniFile::Exception &e) {

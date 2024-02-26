@@ -180,6 +180,8 @@ extern "C" {
         EMCMOT_SET_AXIS_LOCKING_JOINT,  /* set the axis locking joint */
 
         EMCMOT_SET_SPINDLE_PARAMS, /* One command to set all spindle params */
+        
+        EMCMOT_SET_TELEOP_JOG_NO_HOME, /* set variable to allow teleop jog without homing */
 
     } cmd_code_t;
 
@@ -252,7 +254,8 @@ extern "C" {
                                  ~2 = move until probe trips (ngc default)
                                  |2 = move until probe clears */
     int probe_jog_err_inhibit;  // setting to inhibit probe tripped while jogging error.
-    int probe_home_err_inhibit;  // setting to inhibit probe tripped while homeing error.
+    int probe_home_err_inhibit;  // setting to inhibit probe tripped while homing error.
+    int teleop_jog_before_home;  // setting to allow teleop jogging (particularly for gantry) before homing.
     EmcPose tool_offset;        /* TLO */
     double  orientation;    /* angle for spindle orient */
     int state; /*spindle state*/
@@ -726,6 +729,7 @@ Suggestion: Split this in to an Error and a Status flag register..
         double maxFeedScale;
         int inhibit_probe_jog_error;
         int inhibit_probe_home_error;
+        int teleop_jog_before_home;
     } emcmot_config_t;
 
 /* error structure - A ring buffer used to pass formatted printf strings to usr space */
