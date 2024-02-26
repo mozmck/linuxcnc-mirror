@@ -848,14 +848,6 @@ static int base_1joint_state_machine(int joint_num)
                 break;
             }
             H[joint_num].pause_timer = 0;
-            
-            /*
-             * Even if this joint has a negative home sequence,
-             * do NOT do sync here because the other joint may not need to do initial backoff
-             * Sync would wait for the other joint to be in the same state which may never
-             * happen.
-             */
-            
             /* set up a move at '-search_vel' to back off of switch */
             home_start_move(joint, - H[joint_num].home_search_vel);
             /* next state */
@@ -978,13 +970,6 @@ static int base_1joint_state_machine(int joint_num)
                 break;
             }
             H[joint_num].pause_timer = 0;
-
-            // neg home sequence: sync move
-            if ( (H[joint_num].home_sequence  < 0 )
-                && !sync_ready(joint_num) ) {
-                break; // not all joints at *this* state, wait for them
-            }
-
             /* we should still be on the switch */
             if (! home_sw_active) {
                 rtapi_print_msg(RTAPI_MSG_ERR,
@@ -1034,13 +1019,6 @@ static int base_1joint_state_machine(int joint_num)
                 break;
             }
             H[joint_num].pause_timer = 0;
-
-            // neg home sequence: sync move
-            if  (  (H[joint_num].home_sequence  < 0)
-                && !sync_ready(joint_num) ) {
-                break; // not all joints at *this* state, wait for them
-            }
-
             /* we should still be off of the switch */
             if (home_sw_active) {
                 rtapi_print_msg(RTAPI_MSG_ERR, _("Home switch active before start of latch move j=%d"),
@@ -1097,13 +1075,6 @@ static int base_1joint_state_machine(int joint_num)
                 break;
             }
             H[joint_num].pause_timer = 0;
-
-            // neg home sequence: sync move
-            if  (  (H[joint_num].home_sequence  < 0)
-                && !sync_ready(joint_num) ) {
-                break; // not all joints at *this* state, wait for them
-            }
-
             /* we should still be on the switch */
             if (!home_sw_active) {
                 rtapi_print_msg(RTAPI_MSG_ERR,
@@ -1194,13 +1165,6 @@ static int base_1joint_state_machine(int joint_num)
                 break;
             }
             H[joint_num].pause_timer = 0;
-
-            // neg home sequence: sync move
-            if  (  (H[joint_num].home_sequence  < 0)
-                && !sync_ready(joint_num) ) {
-                break; // not all joints at *this* state, wait for them
-            }
-
             /* Although we don't know the exact home position yet, we
                we reset the joint coordinates now so that screw error
                comp will be appropriate for this portion of the screw
@@ -1298,7 +1262,6 @@ static int base_1joint_state_machine(int joint_num)
             if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
                 /* no, update timer and wait some more */
                 H[joint_num].pause_timer++;
-                break;
             }
             H[joint_num].pause_timer = 0;
 
