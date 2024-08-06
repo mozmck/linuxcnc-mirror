@@ -1262,6 +1262,7 @@ static int base_1joint_state_machine(int joint_num)
             if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
                 /* no, update timer and wait some more */
                 H[joint_num].pause_timer++;
+                break;
             }
             H[joint_num].pause_timer = 0;
 
