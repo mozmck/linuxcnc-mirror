@@ -1698,6 +1698,9 @@ int emcPositionLoad() {
     return result;
 }
 
+static int joint_axis_index[EMCMOT_MAX_JOINTS];
+static int axis_primary_joint[EMCMOT_MAX_AXIS];
+
 
 int emcPositionSave() {
     IniFile ini;
@@ -1706,7 +1709,7 @@ int emcPositionSave() {
     ini.Open(emc_inifile);
     try {
         posfile = ini.Find("POSITION_FILE", "TRAJ");
-    } catch (IniFile::Exception e) {
+    } catch (IniFile::Exception &e) {
         ini.Close();
         return -1;
     }
@@ -1717,13 +1720,58 @@ int emcPositionSave() {
     unlink(posfile);
     FILE *f = fopen(posfile, "w");
     if(!f) return -1;
-    for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
-	int r = fprintf(f, "%.17f\n", emcmotStatus.joint_status[i].pos_fb);
-	if(r < 0) { fclose(f); return -1; }
+    if (emcmotConfig.kinType == KINEMATICS_IDENTITY || emcmotConfig.kinType == KINEMATICS_BOTH) {
+        for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
+            int r = fprintf( f, "%.17f\n", emcmotStatus.joint_status[ axis_primary_joint[ joint_axis_index[i] ] ].pos_fb );
+            if(r < 0) { fclose(f); return -1; }
+        }
+    }
+    else {
+        for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
+            int r = fprintf(f, "%.17f\n", emcmotStatus.joint_status[i].pos_fb);
+            if(r < 0) { fclose(f); return -1; }
+        }
     }
     fclose(f);
     return 0;
 }
+
+
+void find_axis_primary_joints(void)
+{
+    int   jno=0, a=0;
+    IniFile ini;
+    ini.Open(emc_inifile);
+    const char *coords = ini.Find("COORDINATES", "TRAJ");
+    ini.Close();
+
+    // init all axis_idx_for_jno[] (-1 means unspecified)
+    for(jno=0; jno<EMCMOT_MAX_JOINTS; jno++) { joint_axis_index[jno] = -1; }
+    for(a=0; a<EMCMOT_MAX_AXIS; a++) { axis_primary_joint[a] = -1; }
+
+    if(!coords || !coords[0]) { coords = "XYZABCUVW"; }
+    jno = 0; // begin: assign joint numbers at 0th coords position
+    while (*coords) {
+        switch(*coords) {
+          case 'x': case 'X': joint_axis_index[jno]= 0;jno++;break;
+          case 'y': case 'Y': joint_axis_index[jno]= 1;jno++;break;
+          case 'z': case 'Z': joint_axis_index[jno]= 2;jno++;break;
+          case 'a': case 'A': joint_axis_index[jno]= 3;jno++;break;
+          case 'b': case 'B': joint_axis_index[jno]= 4;jno++;break;
+          case 'c': case 'C': joint_axis_index[jno]= 5;jno++;break;
+          case 'u': case 'U': joint_axis_index[jno]= 6;jno++;break;
+          case 'v': case 'V': joint_axis_index[jno]= 7;jno++;break;
+          case 'w': case 'W': joint_axis_index[jno]= 8;jno++;break;
+        }
+        coords++; // next coordinates letter
+    } // while
+
+    for (jno=0; jno < EMCMOT_MAX_JOINTS; jno++) {
+         if (axis_primary_joint[joint_axis_index[jno]] == -1) axis_primary_joint[joint_axis_index[jno]]=jno;
+    }
+
+} //map_coordinates_to_jnumbers()
+
 
 // EMC_MOTION functions
 
@@ -1765,6 +1813,7 @@ int emcMotionInit()
 	    }
 	}
 
+    find_axis_primary_joints();
 
     // Ignore errors from emcPositionLoad(), because what are you going to do?
     (void)emcPositionLoad();
