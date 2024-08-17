@@ -1302,10 +1302,12 @@ static void sendJogCont(int ja, double speed, int jjogmode)
     EMC_JOG_CONT emc_jog_cont_msg;
 
     if (emcStatus->task.state != EMC_TASK_STATE_ON) { return; }
-    if (   ( (jjogmode == JOGJOINT) && (emcStatus->motion.traj.mode == EMC_TRAJ_MODE_TELEOP) )
-        || ( (jjogmode == JOGTELEOP ) && (emcStatus->motion.traj.mode != EMC_TRAJ_MODE_TELEOP) )
-       ) {
-       return;
+    if ( (jjogmode == JOGJOINT) && (emcStatus->motion.traj.mode == EMC_TRAJ_MODE_TELEOP) ) {
+        sendJoint();
+    }
+    else if ( (jjogmode == JOGTELEOP ) && (emcStatus->motion.traj.mode != EMC_TRAJ_MODE_TELEOP) ) {
+        sendTeleop();
+        //return;
     }
 
     if (  jjogmode &&  (ja < 0 || ja >= num_joints)) { rtapi_print("halui: unexpected_4 %d\n",ja); return; }
