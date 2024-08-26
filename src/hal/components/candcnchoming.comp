@@ -31,7 +31,7 @@ halcompile and then substituted for the default homing module
 or by inifile setting: \\fB[EMCMOT]HOMEMOD=candcnchoming\\fR
 """;
 
-pin out bit is_module=1; //one pin is required to use halcompile)
+pin out bit is_module=1;  // unused pin to satisfy halcompile (apparently)
 
 license "GPL";
 author "Moses McKnight";
@@ -42,7 +42,6 @@ option  extra_setup;
 /* To incorporate default homing.c file from a local git src tree:
 ** enable #define HOMING_BASE set to the path to the current homing.c file.
 ** (Note: CUSTOM_HOMEMODULE precludes duplicate api symbols)
-** (Edit myname as required for valid path)
 */
 
 #define HOMING_BASE ../../emc/motion/homing.c
@@ -78,11 +77,21 @@ EXTRA_SETUP() {
 #define CUSTOM_HOMEMODULE
 #include USE_HOMING_BASE
 
-//typedef struct {
-//    home_state_t last_state;
-//} ccc_homedata;
-//
-//static ccc_homedata ccc_H[EMCMOT_MAX_JOINTS] = {0};
+typedef struct {
+    hal_bit_t *is_homing;      // output true if homing is in progress
+} custom_hal_data_t;
+
+static custom_hal_data_t *custom_hal_data = 0;
+
+static int custom_makepins(int id,int njoints)
+{
+    custom_hal_data = hal_malloc(sizeof(custom_hal_data_t));
+    if (custom_hal_data == 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "HOMING: custom_hal_data_t malloc failed\n");
+        return -1;
+    }
+    return hal_pin_bit_newf(HAL_OUT, &(custom_hal_data->is_homing), id, "candcnchoming.is-homing");
+} // custom_makepins()
 
 
 // SEQUENCE management
@@ -1004,11 +1013,14 @@ int homing_init(int id,
                 int n_extrajoints,
                 emcmot_joint_t* pjoints)
 {
-    return base_homing_init(id,
+    int retval;
+    retval = base_homing_init(id,
                               servo_period,
                               n_joints,
                               n_extrajoints,
                               pjoints);
+    retval += custom_makepins(id,n_joints);
+    return retval;
 } // homing_init()
 
 void read_homing_in_pins(int njoints)
@@ -1046,6 +1058,7 @@ bool do_homing(void)
             homing_active = 0;
         }
     }
+    *(custom_hal_data->is_homing) = homing_active;
     // return 1 if homing completed this period
     if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
     return 0;
