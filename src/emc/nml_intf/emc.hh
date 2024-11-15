@@ -543,7 +543,7 @@ int emcSetupArcBlends(int arcBlendEnable,
         int arcBlendGapCycles,
         double arcBlendRampFreq,
         double arcBlendTangentKinkRatio);
-int emcSetProbeErrorInhibit(int j_inhibit, int h_inhibit);
+int emcSetProbeErrorInhibit(int j_inhibit, int h_inhibit, int m_inhibit);
 int emcSetTeleopJogBeforeHome(int t_jog);
 int emcGetExternalOffsetApplied(void);
 EmcPose emcGetExternalOffsets(void);

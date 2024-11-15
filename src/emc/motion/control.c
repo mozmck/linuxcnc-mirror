@@ -719,11 +719,14 @@ static void process_probe_inputs(void)
         int i;
         int aborted = 0;
 
-        if(!GET_MOTION_INPOS_FLAG() && tpQueueDepth(&emcmotInternal->coord_tp)) {
-            // running an command
-            tpAbort(&emcmotInternal->coord_tp);
-            reportError(_("Probe tripped during non-probe move."));
-	    SET_MOTION_ERROR_FLAG(1);
+        // inhibit_probe_move_error is set by [TRAJ]->NO_PROBE_MOVE_ERROR in the ini file
+        if (!emcmotConfig->inhibit_probe_move_error) {
+            if(!GET_MOTION_INPOS_FLAG() && tpQueueDepth(&emcmotInternal->coord_tp)) {
+                // running an command
+                tpAbort(&emcmotInternal->coord_tp);
+                reportError(_("Probe tripped during non-probe move."));
+                SET_MOTION_ERROR_FLAG(1);
+            }
         }
 
         for(i=0; i<NO_OF_KINS_JOINTS; i++) {
@@ -739,18 +742,20 @@ static void process_probe_inputs(void)
                 // abort any homing
                 if(get_homing(i)) {
                     do_cancel_homing(i);
+                    // abort any joint jogs
+                    if(joint->free_tp.enable == 1) {  // homing uses free_tp
+                        joint->free_tp.enable = 0;
+                    }
                     aborted=1;
                 }
             }
 
             // inhibit_probe_jog_error is set by [TRAJ]->NO_PROBE_JOG_ERROR in the ini file
-            if (!emcmotConfig->inhibit_probe_jog_error) {
+            else if (!emcmotConfig->inhibit_probe_jog_error) {
                 // abort any joint jogs
                 if(joint->free_tp.enable == 1) {
                     joint->free_tp.enable = 0;
-                    // since homing uses free_tp, this protection of aborted
-                    // is needed so the user gets the correct error.
-                    if(!aborted) aborted=2;
+                    aborted=2;
                 }
             }
         }

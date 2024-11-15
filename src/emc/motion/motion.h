@@ -255,6 +255,7 @@ extern "C" {
                                  |2 = move until probe clears */
     int probe_jog_err_inhibit;  // setting to inhibit probe tripped while jogging error.
     int probe_home_err_inhibit;  // setting to inhibit probe tripped while homing error.
+    int probe_move_err_inhibit;  // setting to inhibit probe tripped during non-probe move error.
     int teleop_jog_before_home;  // setting to allow teleop jogging (particularly for gantry) before homing.
     EmcPose tool_offset;        /* TLO */
     double  orientation;    /* angle for spindle orient */
@@ -729,6 +730,7 @@ Suggestion: Split this in to an Error and a Status flag register..
         double maxFeedScale;
         int inhibit_probe_jog_error;
         int inhibit_probe_home_error;
+        int inhibit_probe_move_error;
         int teleop_jog_before_home;
     } emcmot_config_t;
 

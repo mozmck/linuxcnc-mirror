@@ -1060,7 +1060,11 @@ bool do_homing(void)
     }
     *(custom_hal_data->is_homing) = homing_active;
     // return 1 if homing completed this period
-    if (!beginning_allhomed && get_allhomed()) {homing_active=0; return 1;}
+    if (!beginning_allhomed && get_allhomed()) {
+        homing_active=0;
+        *(custom_hal_data->is_homing) = homing_active;
+        return 1;
+    }
     return 0;
 }
 
