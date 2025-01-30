@@ -52,13 +52,13 @@ option  extra_setup;
 #include "motion.h"
 #include "homing.h"
 
-static char *home_parms;
-RTAPI_MP_STRING(home_parms,"Example home parms");
+//static char *home_parms;
+//RTAPI_MP_STRING(home_parms,"Example home parms");
 
 // EXTRA_SETUP is executed before rtapi_app_main()
 EXTRA_SETUP() {
-    if (!home_parms) {home_parms = "no_home_parms";}
-    rtapi_print("@@@%s:%s: home_parms=%s\n",__FILE__,__FUNCTION__,home_parms);
+//    if (!home_parms) {home_parms = "no_home_parms";}
+//    rtapi_print("@@@%s:%s: home_parms=%s\n",__FILE__,__FUNCTION__,home_parms);
 #ifndef HOMING_BASE
     rtapi_print("\n!!!%s: Skeleton Homing Module\n\n",__FILE__);
 #else
@@ -77,6 +77,25 @@ EXTRA_SETUP() {
 #define CUSTOM_HOMEMODULE
 #include USE_HOMING_BASE
 
+
+/* Length of delay between homing motions - this is intended to
+   ensure that all motion has ceased and switch bouncing has
+   ended.  We might want to make this user adjustable, but for
+   now it's a constant.  It is in seconds */
+#define CCC_HOME_DELAY 0.100 * servo_freq
+//int jdelay = servo_freq * .100;
+
+
+//#define CCC_EXTRA_DEBUG
+#ifdef CCC_EXTRA_DEBUG
+typedef struct {
+    home_state_t last_state;
+    //bool         delay_finished;
+} ccc_home_data;
+
+static  ccc_home_data ccc_H[EMCMOT_MAX_JOINTS];
+#endif
+
 typedef struct {
     hal_bit_t *is_homing;      // output true if homing is in progress
 } custom_hal_data_t;
@@ -90,6 +109,10 @@ static int custom_makepins(int id,int njoints)
         rtapi_print_msg(RTAPI_MSG_ERR, "HOMING: custom_hal_data_t malloc failed\n");
         return -1;
     }
+#ifdef CCC_EXTRA_DEBUG
+    rtapi_print("jdelay = %d\n", CCC_HOME_DELAY);
+#endif
+
     return hal_pin_bit_newf(HAL_OUT, &(custom_hal_data->is_homing), id, "candcnchoming.is-homing");
 } // custom_makepins()
 
@@ -97,7 +120,7 @@ static int custom_makepins(int id,int njoints)
 // SEQUENCE management
 static void ccc_do_homing_sequence(void)
 {
-    int i,ii;
+    int i;  //,ii;
     int seen;
     emcmot_joint_t *joint;
     int sequence_is_set = 0;
@@ -291,6 +314,9 @@ static bool check_sync()
             if (H[jno].home_state != H[sync_joint].home_state) {
                 return false; // not ready
             }
+            else if ( H[jno].pause_timer < CCC_HOME_DELAY ) {
+                return false; // this joint still doing delay so we aren't ready to do a sync move
+            }
         }
         sync_ready_state = H[sync_joint].home_state;
         return true;
@@ -312,6 +338,27 @@ static bool ccc_sync_ready(int joint_num)
         return 1; // ready
     }
     return 0;
+}
+
+static void reset_joint_pause(int joint_num)
+{
+    H[joint_num].pause_timer = 0;
+}
+
+static bool joint_paused(int joint_num)
+{
+    // has delay timed out?
+    if (H[joint_num].pause_timer < CCC_HOME_DELAY) {
+        // no, update timer and wait some more
+        H[joint_num].pause_timer++;
+#ifdef CCC_EXTRA_DEBUG
+        if (H[joint_num].pause_timer >= CCC_HOME_DELAY) {
+            rtapi_print("joint %d delay ended\n", joint_num);
+        }
+#endif
+        return true;  // still paused
+    }
+    return false;  // pause ended
 }
 
 
@@ -346,12 +393,15 @@ static int ccc_1joint_state_machine(int joint_num)
        you want an infinite loop! */
     do {
         immediate_state = 0;
-//        if (ccc_H[joint_num].last_state != H[joint_num].home_state) {
-//            rtapi_print("H[%d].homed=%d, homing=%d, home_state=%d, sw=%d, sync_ready_state=%d, sync_joint=%d\n",
-//                joint_num, H[joint_num].homed, H[joint_num].homing, H[joint_num].home_state, 
-//                H[joint_num].home_sw, sync_ready_state, sync_joint);
-//        }
-//        ccc_H[joint_num].last_state = H[joint_num].home_state;
+
+#ifdef CCC_EXTRA_DEBUG
+        if (ccc_H[joint_num].last_state != H[joint_num].home_state) {
+            rtapi_print("H[%d].homed=%d, homing=%d, home_state=%d, sw=%d, sync_ready_state=%d, sync_joint=%d\n",
+                joint_num, H[joint_num].homed, H[joint_num].homing, H[joint_num].home_state, 
+                H[joint_num].home_sw, sync_ready_state, sync_joint);
+        }
+        ccc_H[joint_num].last_state = H[joint_num].home_state;
+#endif
 
         switch (H[joint_num].home_state) {
         case HOME_IDLE:
@@ -378,9 +428,9 @@ static int ccc_1joint_state_machine(int joint_num)
                 H[joint_num].homing = 1;
                 H[joint_num].homed = 0;
             }
-            joint->free_tp.enable = 0;    /* stop any existing motion */
-            ccc_sync_reset();                 /* stop any interrupted/canceled sync */
-            H[joint_num].pause_timer = 0; /* reset delay counter */
+            joint->free_tp.enable = 0;          /* stop any existing motion */
+            ccc_sync_reset();                   /* stop any interrupted/canceled sync */
+            reset_joint_pause(joint_num);       /* reset delay counter */
             /* figure out exactly what homing sequence is needed */
             if (H[joint_num].home_flags & HOME_ABSOLUTE_ENCODER) {
                 H[joint_num].home_flags &= ~HOME_IS_SHARED; // shared not applicable
@@ -452,16 +502,15 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint still moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            //if (H[joint_num].pause_timer < (CCC_HOME_DELAY * servo_freq)) {
+            if (joint_paused(joint_num)) {
                 break;
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
             /* set up a move at '-search_vel' to back off of switch */
             home_start_move(joint, - H[joint_num].home_search_vel);
             /* next state */
@@ -493,13 +542,11 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
             // neg home sequence: sync move
@@ -507,7 +554,7 @@ static int ccc_1joint_state_machine(int joint_num)
                 && !ccc_sync_ready(joint_num) ) {
                 break; // wait for all joints with the same negative sequence to be at the same state
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
 
             /* set up a move at 'search_vel' to find switch */
             home_start_move(joint, H[joint_num].home_search_vel);
@@ -573,13 +620,11 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
             // neg home sequence: sync move
@@ -587,7 +632,7 @@ static int ccc_1joint_state_machine(int joint_num)
                 && !ccc_sync_ready(joint_num) ) {
                 break; // wait for all joints with the same negative sequence to be at the same state
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
 
             /* we should still be on the switch */
             if (! home_sw_active) {
@@ -628,13 +673,11 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
             // neg home sequence: sync move
@@ -642,7 +685,7 @@ static int ccc_1joint_state_machine(int joint_num)
                 && !ccc_sync_ready(joint_num) ) {
                 break; // wait for all joints with the same negative sequence to be at the same state
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
 
             /* we should still be off of the switch */
             if (home_sw_active) {
@@ -690,13 +733,11 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
             // neg home sequence: sync move
@@ -704,7 +745,7 @@ static int ccc_1joint_state_machine(int joint_num)
                 && !ccc_sync_ready(joint_num) ) {
                 break; // wait for all joints with the same negative sequence to be at the same state
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
 
             /* we should still be on the switch */
             if (!home_sw_active) {
@@ -786,16 +827,14 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
-            H[joint_num].pause_timer = 0;
+            reset_joint_pause(joint_num);
             /* Although we don't know the exact home position yet, we
                we reset the joint coordinates now so that screw error
                comp will be appropriate for this portion of the screw
@@ -886,13 +925,11 @@ static int ccc_1joint_state_machine(int joint_num)
             /* is the joint already moving? */
             if (joint->free_tp.active) {
                 /* yes, reset delay, wait until joint stops */
-                H[joint_num].pause_timer = 0;
+                reset_joint_pause(joint_num);
                 break;
             }
             /* has delay timed out? */
-            if (H[joint_num].pause_timer < (HOME_DELAY * servo_freq)) {
-                /* no, update timer and wait some more */
-                H[joint_num].pause_timer++;
+            if (joint_paused(joint_num)) {
                 break;
             }
             // neg home sequence: sync final move
@@ -900,7 +937,9 @@ static int ccc_1joint_state_machine(int joint_num)
                   && !ccc_sync_ready(joint_num) ) {
                 break; // wait for all joints with the same negative sequence to be at the same state
             }
-            H[joint_num].pause_timer = 0;
+
+            // NOTICE!  DO NOT CALL reset_joint_pause() here or the wait for sync in HOME_FINAL_MOVE_WAIT
+            // will never complete because the pause_timer will always be less than CCC_HOME_DELAY 
 
             /* plan a final move to home position */
             joint->free_tp.pos_cmd = H[joint_num].home;
