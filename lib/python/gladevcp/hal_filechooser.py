@@ -159,7 +159,8 @@ class _EMC_FileChooser(_EMC_ActionBase):
         extensions = inifile.findall("FILTER", "PROGRAM_EXTENSION")
         extensions = [e.split(None, 1) for e in extensions]
         extensions = tuple([(v, tuple(k.split(","))) for k, v in extensions])
-        map(lambda t: all_extensions.extend(t[1]), extensions)
+        for t in extensions:
+            all_extensions.extend(t[1])
         self.add_filter(_e2p("All machinable files", all_extensions))
         self.add_filter(_e2p("rs274ngc files", ['.ngc']))
         for n,e in extensions:
