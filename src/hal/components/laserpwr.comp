@@ -1,0 +1,87 @@
+// This component is for reducing laser power proportionately to feedrate reduction
+
+component laserpwr "Modify laser power based on velocity";
+
+author "Moses McKnight";
+license "GPLv2 or greater";
+option singleton yes;
+
+pin in float current_vel        "Value being compared - motion.current-vel";
+pin in float requested_vel      "Reference value - motion.requested-vel";
+pin in float upper_vel_pct      "Percentage of requested-vel below which we start reducing output power - must be between 0.0 and 100.0";
+pin in float lower_vel_pct      "Percentage of requested-vel below which we leave output power at min_pwr_pct - must be between 0.0 and 100.0";
+pin in float min_pwr_pct       "lowest output power as percentage of pwm_in";
+pin in bit enable               "If true, the velocity based pwm slowdown logic is enabled.";
+pin in bit prog_is_idle         "connect to halui.program.is-idle";
+pin in float pwr_in            "External PWM value input pin: typically connected to motion.analog-out-xx and controlled from gcode.";
+
+pin out float pwr_out "Output PWM value: connect to ...pwmgen.xx.value";
+
+
+// Global Variables
+variable double velocity_ratio_pct;
+variable double vel_range;
+variable double pwr_range;
+variable double vel_offset;
+
+//int power, int current_velocity, int requested_velocity, int minpwr, int upper_vel_pct, int lower_vel_pct
+
+
+function _ fp "Update output based on inputs";
+
+;;
+
+/**
+ * Vary power output based on velocity ratio
+ * 
+ * This function adjusts the power output (pwr_out) from 100% down to minpwr%
+ * based on the ratio of current velocity to requested velocity. 
+ * 
+ * power              - Input power value (base reference)
+ * current_velocity   - Current velocity value
+ * requested_velocity - Requested/target velocity value
+ * minpwr             - Minimum power percentage (0-100)
+ * upper_vel_pct      - Upper velocity percent threshold (0-100)
+ * lower_vel_pct      - Lower velocity percent threshold (0-100)
+ * 
+ * Power output percentage (0-100)
+ */
+FUNCTION(_)
+{
+    // Calculate velocity ratio as a percentage (0-100+)
+    // If requested_velocity is 0, return minimum power to avoid division by zero
+    if (enable && !prog_is_idle && (requested_vel > 0.0))
+    {
+        velocity_ratio_pct = (current_vel * 100.0) / requested_vel;
+        
+        // Clamp velocity ratio to the operating range
+        // Upper threshold: at or above upper_vel_pct, output 100%
+        // Lower threshold:  at or below lower_vel_pct, output minpwr%
+        
+        if (velocity_ratio_pct >= upper_vel_pct) {
+            // At or above upper velocity threshold - full power
+            pwr_out = pwr_in;
+        }
+        else if (velocity_ratio_pct <= lower_vel_pct) {
+            // At or below lower velocity threshold - minimum power
+            pwr_out = (pwr_in * min_pwr_pct) / 100.0;
+        }
+        else {
+            // Linear interpolation between minpwr and 100 based on velocity ratio
+            // Map the range [lower_vel_pct, upper_vel_pct] to [minpwr, 100]
+            
+            vel_range = upper_vel_pct - lower_vel_pct;
+            pwr_range = 100.0 - min_pwr_pct;
+            vel_offset = velocity_ratio_pct - lower_vel_pct;
+            
+            // Linear interpolation:  minpwr + (pwr_range * vel_offset) / vel_range
+            pwr_out = ( pwr_in * ( min_pwr_pct + ((pwr_range * vel_offset) / vel_range) ) ) / 100;
+        }
+    }
+    else
+    {
+        pwr_out = pwr_in;
+    }
+    
+}
+

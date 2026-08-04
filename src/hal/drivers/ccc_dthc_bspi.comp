@@ -1,0 +1,1613 @@
+component ccc_dthc_bspi "CandCNC DTHC6 BSPI master for hostmot2";
+
+description """
+This component drives the CandCNC DTHC6 SPI protocol over a HostMot2 BSPI
+instance. It follows the packet format built by spi_send_frame() in
+the DTHC6 firmware:
+
+  [0] SOF (0x55)
+  [1] LENGTH = N
+  [2] COMMAND
+  [3..N-1] PAYLOAD
+  [N] CRC-8 over bytes [0..N-1]
+
+The component queues twelve 32-bit BSPI echo transfers to move the full
+48-byte packet every servo cycle. HostMot2 TRAM buffers are 32-bit wide,
+so each packet word carries four bytes. Write-side pins live under cfg.* and
+cmd.*. Readback pins live under fb.*, data.*, history.* and status.*.
+
+CMD_DATA requests carry a single control-flags byte (bit-packed):
+  bit 0 : motor_up
+  bit 1 : thc_enable  (only used when use_enable_pin is 0)
+  bit 2 : reset_step_delta
+  bit 3 : torch_off
+  bit 4 : enable_autoset
+  bit 5 : do_autoset
+  bit 6 : use_enable_pin  (defer enable/disable to hardware pin)
+  bit 7 : motor_down
+
+CMD_DATA replies carry inline voltage history after the base fields.
+
+Z-axis position tracking:
+  When status.mtr-external is false the firmware controls Z via its internal
+  stepper.  thc.zpos-out = thc.zpos-in + data.step-delta / fb.motor.steps-per-unit.
+  When the firmware returns Z control to LinuxCNC (status.mtr-external goes
+  false -> true) the component captures the accumulated offset in thc.zpos-final,
+  asserts thc.zsync-ready for two servo cycles, and queues a reset-step-delta
+  so the firmware counter zeroes out.
+
+gcode-cmd decoding (connect to motion.analog-out-00):
+  S10x  : current% = x, disable THC
+  S20x  : current% = x, enable  THC
+  S50x / S500-599 : set THC delay (tenths of sec)
+  S300-399 / S3000-3255 : set setpoint (volts)
+  S80   : enable autoset
+  S81   : one-shot autoset
+  S89   : disable autoset
+  S90   : enable  THC
+  S99   : disable THC
+  S900  : enable  THC + clear DCC-disable
+  S999  : disable THC + set  DCC-disable
+  S400-499 / S4000-4254 : Hypertherm plasma current in amps -> thc.current-cmd
+  S800-899 / S8000-8999 : Hypertherm air pressure          -> thc.air-pressure
+""";
+
+/* ---- SPI control flags sent with every CMD_DATA request ---- */
+pin in bit cmd.motor-up "Momentary DTHC6 internal-motor up command (bit 0)";
+pin in bit cmd.motor-down "Momentary DTHC6 internal-motor down command (bit 7)";
+pin in bit cmd.machine-is-on "Machine power interlock for internal-motor test";
+pin in bit cmd.use-enable-pin "Defer enable to hardware input pin (bit 6). Normally 1.";
+pin in bit cmd.reset-step-delta "One-shot: zero the firmware step-delta counter";
+pin in bit cmd.torch-off "Torch-off command (bit 3)";
+pin in bit cmd.do-autoset "One-shot autoset trigger (bit 5)";
+pin io bit cmd.enable-autoset "Continuous autoset enable (bit 4); writable so gcode-cmd S80/S89 can update it";
+
+/* ---- One-shot config commands ---- */
+pin in bit cmd.request-config "One-shot: request the full configuration frame from firmware";
+pin in bit cmd.write-thc-config "One-shot: write cfg.thc.* to firmware";
+pin in bit cmd.write-motor-config "One-shot: write cfg.motor.* to firmware";
+pin in bit cmd.write-autosettings "One-shot: write cfg.autoset.* and read back applied values";
+
+/* ---- THC tuning parameters (input from INI or GUI) ---- */
+pin in float cfg.thc.deadband "Deadband in volts";
+pin io float cfg.thc.delay "Delay in seconds (writable so gcode-cmd S5xx can update it)";
+pin io u32 cfg.thc.set-point "Set point in volts (writable so gcode-cmd S3xx can update it)";
+pin in u32 cfg.thc.upper-limit "Upper fault limit in volts";
+pin in u32 cfg.thc.lower-limit "Lower fault limit in volts";
+pin in u32 cfg.thc.arcok-current "Arc-ok current threshold";
+pin in u32 cfg.thc.minvel "Minimum velocity";
+pin in u32 cfg.thc.pgain "P gain";
+pin in u32 cfg.thc.igain "I gain";
+pin in u32 cfg.thc.dgain "D gain";
+
+/* ---- THC tuning readback from firmware ---- */
+pin out float fb.thc.deadband;
+pin out float fb.thc.delay;
+pin out u32 fb.thc.set-point;
+pin out u32 fb.thc.upper-limit;
+pin out u32 fb.thc.lower-limit;
+pin out u32 fb.thc.arcok-current;
+pin out u32 fb.thc.minvel;
+pin out u32 fb.thc.pgain;
+pin out u32 fb.thc.igain;
+pin out u32 fb.thc.dgain;
+
+/* ---- Motor / Z-axis parameters ---- */
+pin in u32 cfg.motor.steps-per-unit;
+pin in u32 cfg.motor.max-up-velocity;
+pin in u32 cfg.motor.max-down-velocity;
+pin in u32 cfg.motor.acceleration;
+pin in bit cfg.motor.dir-up-polarity "High direction output = up";
+pin in bit cfg.motor.step-polarity "Active-high steps";
+pin in bit cfg.motor.metric-units;
+
+pin out u32 fb.motor.steps-per-unit;
+pin out u32 fb.motor.max-up-velocity;
+pin out u32 fb.motor.max-down-velocity;
+pin out u32 fb.motor.acceleration;
+pin out bit fb.motor.dir-up-polarity;
+pin out bit fb.motor.step-polarity;
+pin out bit fb.motor.metric-units;
+
+/* ---- Autoset parameters ---- */
+pin io float cfg.autoset.upper-tol "Autoset upper tolerance in volts";
+pin io float cfg.autoset.lower-tol "Autoset lower tolerance in volts";
+pin io float cfg.autoset.delay "Autoset delay in seconds (written by auto-delay calculation)";
+
+pin out float fb.autoset.upper-tol;
+pin out float fb.autoset.lower-tol;
+pin out float fb.autoset.delay;
+
+/* ---- Live data from firmware ---- */
+pin out u32 data.tip-volts "Measured arc voltage in volts";
+pin out u32 data.current "Measured arc current";
+pin out u32 data.target-volts "Active target voltage";
+pin out s32 data.step-delta "Accumulated motor step delta from firmware";
+pin out u32 fw.app-rev "DTHC6 application firmware revision (FW_REV)";
+
+/* ---- Status word and decoded bits ---- */
+pin out u32 status.code "Raw 32-bit firmware status word";
+pin out bit status.fault;
+pin out bit status.delay;
+pin out bit status.tipsave-active;
+pin out bit status.enabled;
+pin out bit status.tipsave-on;
+pin out bit status.eeread-err;
+pin out bit status.eewrite-err;
+pin out bit status.arcok-on;
+pin out bit status.mtrvolt-high;
+pin out bit status.mtrvolt-low;
+pin out bit status.mtrvolt-off;
+pin out bit status.gecko-fault;
+pin out bit status.eegood;
+pin out bit status.torch-on;
+pin out bit status.hold;
+pin out bit status.up;
+pin out bit status.down;
+pin out bit status.mtr-external "Firmware has handed Z control back to LinuxCNC";
+pin out bit status.test-mode;
+pin out bit status.wd-good;
+pin out bit status.as-sample-good;
+pin out bit status.as-sample-bad;
+pin out bit status.has-autoset "Firmware supports autoset feature";
+pin out bit status.debug;
+
+/* ---- Voltage history (populated from each CMD_DATA reply) ---- */
+pin out u32 history.sample-count;
+pin out float history.sample.# [20];
+
+/* ---- Z-axis position tracking ---- */
+pin in float thc.zpos-in "Z position input from LinuxCNC (halui.axis.z.pos-relative)";
+pin out float thc.zpos-out "Adjusted Z position output (connect to Z DRO / joint fb)";
+pin out float thc.zpos-final "Z offset captured when firmware hands back Z control";
+pin out bit thc.zcntrl-int "True when firmware is controlling Z (STAT_MTR_EXTERNAL == 0)";
+pin in bit thc.zsync-done "LinuxCNC signals it has handled the Z sync (currently unused)";
+pin out bit thc.zsync-ready "True for 2 cycles when firmware returns Z to external control";
+
+/* ---- Gcode command input (connect to motion.analog-out-00) ---- */
+pin in float thc.gcode-cmd "Gcode command value (encodes S-code style commands for THC control)";
+
+/* ---- Manual / auto mode ---- */
+pin io bit thc.manual-auto-toggle "Rising edge toggles between manual and auto mode; cleared by comp";
+pin out bit thc.manual-mode "True when in manual mode (S-codes ignored for enable/disable)";
+pin io bit thc.auto-mode = 1 "True when in auto mode";
+
+/* ---- THC enable control ---- */
+pin io bit thc.enable-toggle "Rising edge toggles THC enable state; cleared by comp";
+pin out bit thc.disable-out = 1 "Active when THC is disabled; connect to thcenable.extdisable";
+
+/* ---- Program control ---- */
+pin in bit thc.prog-is-idle "Program idle signal from halui.program.is-idle";
+pin io bit thc.stop-on-fault "When true, assert prog-stop-out on fault while gcode runs";
+pin out bit thc.prog-stop-out "Assert to stop program on fault; connect to halui.program.stop";
+
+/* ---- Velocity anti-dive / auto-delay inputs ---- */
+pin in bit thc.vad-enabled "Velocity anti-dive enabled";
+pin in s32 thc.vad-percent "VAD percentage (from thcenable.percent)";
+pin in float thc.xy-accel "XY axis acceleration in units/sec^2 (used for auto-delay calc)";
+pin in bit thc.autodelay "When true, use auto-calculated THC delay instead of cfg.thc.delay";
+
+/* ---- Hypertherm command pins ---- */
+pin out u32 thc.hyt-current "Scaled plasma current out to hypertherm; connect to ccc-main.hytconnect.current-cmd";
+pin out u32 thc.hyt-pressure "Plasma air pressure out to hypertherm; connect to ccc-main.hytconnect.air-pressure";
+pin io u32 thc.current-cmd "Requested plasma current to/from UI";
+pin io u32 thc.air-pressure "Requested plasma air pressure to/from UI";
+
+/* ---- Communication diagnostics ---- */
+pin out bit comm.online "True while valid frames are still arriving";
+pin out bit comm.config-valid "True after at least one valid config reply";
+pin out bit comm.autosettings-valid "True after at least one valid autosettings reply";
+pin out u32 comm.last-tx-cmd;
+pin out u32 comm.last-rx-cmd;
+pin out u32 comm.good-frames;
+pin out u32 comm.bad-frames;
+pin out u32 comm.bad-sof;
+pin out u32 comm.bad-crc;
+pin out u32 comm.bad-length;
+pin out u32 comm.unexpected-cmd;
+
+/* ---- Firmware update bridge ---- */
+pin in bit update.enable "Suspend runtime traffic and expose raw BSPI bridge";
+pin out bit update.active "True while runtime traffic is suspended for update";
+pin out bit update.bridge-ready "True when userspace may exchange raw 48-byte frames";
+pin out u32 update.state "Firmware update state: 0 RUN, 1 QUIESCING, 2 BRIDGE_READY, 3 BRIDGE_BUSY, 4 RESTORING, 5 FAULT";
+pin out s32 update.error-code "Firmware update bridge error: 0 none, 1 FIFO clear, 2 shmem, 3 overrun, 4 transfer, 5 aborted";
+
+param rw u32 comm.online-timeout-cycles = 100 "Servo cycles to keep comm.online after last good frame";
+
+option extra_setup yes;
+option extra_cleanup yes;
+option singleton yes;
+
+/* ---- BSPI TRAM pointers (one u32 TRAM entry per 4 packet bytes, 32-bit frames) ---- */
+variable unsigned *tram_write[12];
+variable unsigned *tram_read[12];
+
+/* ---- SPI frame buffers ---- */
+variable uint8_t tx_frame[48];
+variable uint8_t rx_frame[48];
+
+/* ---- Pending command flags ---- */
+variable unsigned pending_config_read;
+variable unsigned pending_thc_config_write;
+variable unsigned pending_motor_config_write;
+variable unsigned pending_autosettings_write;
+variable unsigned pending_reset_step_delta;
+variable unsigned pending_do_autoset;
+
+/* ---- Online countdown ---- */
+variable unsigned online_countdown;
+
+/* ---- Motor-test release-to-rearm interlock ---- */
+variable unsigned motor_test_armed;
+
+/* ---- One-shot edge detection for cmd.* pins ---- */
+variable unsigned prev_reset_step_delta;
+variable unsigned prev_do_autoset;
+variable unsigned prev_request_config;
+variable unsigned prev_write_thc_config;
+variable unsigned prev_write_motor_config;
+variable unsigned prev_write_autosettings;
+
+/* ---- Z-axis tracking state ---- */
+variable unsigned prev_mtr_external;
+variable unsigned zsync_step_counter;
+
+/* ---- THC enable state ---- */
+variable unsigned internal_enable;
+variable unsigned prev_enable_toggle;
+variable unsigned dcc_thc_disable;
+
+/* ---- Manual/auto mode state ---- */
+variable unsigned ignore_scodes;
+variable unsigned prev_manual_auto_toggle;
+variable unsigned thc_err_displayed;
+
+/* ---- Gcode command tracking ---- */
+variable double last_gcode_cmd;
+variable unsigned plasma_current_percent;
+
+/* ---- Auto-delay calculation ---- */
+variable double thc_auto_delay;
+variable unsigned prev_vad_enabled;
+variable int prev_vad_percent;
+variable double prev_xy_accel;
+
+/* ---- Autosettings change tracking ---- */
+variable double prev_aset_upper_tol;
+variable double prev_aset_lower_tol;
+
+/* ---- Firmware update bridge state ---- */
+variable void *bridge_shmem_ptr;
+variable unsigned bridge_inflight;
+variable unsigned bridge_discard_next_read;
+variable uint32_t bridge_inflight_seq;
+
+license "GPL";
+author "Moses McKnight";
+
+include <hostmot2-serial.h>;
+include <stdint.h>;
+include <string.h>;
+;;
+
+/* ================================================================
+ * Constants
+ * ================================================================ */
+#define DTHC_SPI_PACKET_SIZE  48
+#define DTHC_SPI_TRAM_SLOTS   (DTHC_SPI_PACKET_SIZE / 4)
+#define DTHC_SPI_PAYLOAD_MAX  44
+#define DTHC_SPI_BSPI_CHANNEL 0
+
+#define DTHC_SPI_SOF          0x55u
+
+#define DTHC_SPI_CMD_DATA         2
+#define DTHC_SPI_CMD_CONFIG       3
+#define DTHC_SPI_CMD_CONF_SET     4
+#define DTHC_SPI_CMD_AUTOSETTINGS 12
+
+#define DTHC_STAT_FAULT          0x00000001u
+#define DTHC_STAT_DELAY          0x00000002u
+#define DTHC_STAT_TIPSAVE_ACT    0x00000004u
+#define DTHC_STAT_ENABLED        0x00000008u
+#define DTHC_STAT_TIPSAVE_ON     0x00000010u
+#define DTHC_STAT_EEREAD_ERR     0x00000020u
+#define DTHC_STAT_EEWRITE_ERR    0x00000040u
+#define DTHC_STAT_ARCOK_ON       0x00000080u
+#define DTHC_STAT_MTRVOLT_HIGH   0x00000100u
+#define DTHC_STAT_MTRVOLT_LOW    0x00000200u
+#define DTHC_STAT_MTRVOLT_OFF    0x00000400u
+#define DTHC_STAT_GECKO_FAULT    0x00000800u
+#define DTHC_STAT_EEGOOD         0x00001000u
+#define DTHC_STAT_TORCH_ON       0x00002000u
+#define DTHC_STAT_HOLD           0x00004000u
+#define DTHC_STAT_UP             0x00008000u
+#define DTHC_STAT_DOWN           0x00010000u
+#define DTHC_STAT_MTR_EXTERNAL   0x00020000u
+#define DTHC_STAT_TEST_MODE      0x00040000u
+#define DTHC_STAT_WD_GOOD        0x00080000u
+#define DTHC_STAT_AS_SAMPLE_GOOD 0x00100000u
+#define DTHC_STAT_AS_SAMPLE_BAD  0x00200000u
+#define DTHC_STAT_HAS_AUTOSET    0x40000000u
+#define DTHC_STAT_DEBUG          0x80000000u
+
+enum {
+    DTHC_FRAME_OK = 0,
+    DTHC_FRAME_BAD_SOF,
+    DTHC_FRAME_BAD_LENGTH,
+    DTHC_FRAME_BAD_CRC,
+};
+
+#define DTHC_UPDATE_RUN          0u
+#define DTHC_UPDATE_QUIESCING    1u
+#define DTHC_UPDATE_BRIDGE_READY 2u
+#define DTHC_UPDATE_BRIDGE_BUSY  3u
+#define DTHC_UPDATE_RESTORING    4u
+#define DTHC_UPDATE_FAULT        5u
+
+#define DTHC_UPDATE_ERR_NONE        0
+#define DTHC_UPDATE_ERR_FIFO_CLEAR  1
+#define DTHC_UPDATE_ERR_SHMEM       2
+#define DTHC_UPDATE_ERR_OVERRUN     3
+#define DTHC_UPDATE_ERR_TRANSFER    4
+#define DTHC_UPDATE_ERR_ABORTED     5
+
+#define DTHC_BSPI_BRIDGE_MAGIC      0x44544836u /* "DTH6" */
+#define DTHC_BSPI_BRIDGE_ABI        1u
+#define DTHC_BSPI_BRIDGE_SHMEM_KEY  0xD6B5C1u
+
+typedef struct {
+    volatile uint32_t magic;
+    volatile uint32_t abi_version;
+    volatile uint32_t struct_size;
+    volatile uint32_t bridge_state;
+    volatile int32_t  bridge_error;
+    volatile uint32_t request_seq;
+    volatile uint32_t response_seq;
+    volatile int32_t  response_status;
+    volatile uint8_t  request_frame[DTHC_SPI_PACKET_SIZE];
+    volatile uint8_t  response_frame[DTHC_SPI_PACKET_SIZE];
+} dthc_bspi_bridge_shm_t;
+
+static int dthc_bridge_shmem_id = -1;
+
+/* ================================================================
+ * Module parameters
+ * ================================================================ */
+char *bspi_chan = 0;
+RTAPI_MP_STRING(bspi_chan, "HostMot2 BSPI instance name");
+
+int spi_cs = 0;
+RTAPI_MP_INT(spi_cs, "BSPI chip select");
+
+int spi_mhz = 10;
+RTAPI_MP_INT(spi_mhz, "BSPI clock rate in .1 MHz (10th MHz)");
+
+int spi_delay_ns = 0;
+RTAPI_MP_INT(spi_delay_ns, "BSPI chip-select delay in nanoseconds");
+
+int spi_cpol = 0;
+RTAPI_MP_INT(spi_cpol, "BSPI clock polarity");
+
+int spi_cpha = 0;
+RTAPI_MP_INT(spi_cpha, "BSPI clock phase; DTHC6 firmware and bootloader use SPI mode 0");
+
+int spi_samplelate = 0;
+RTAPI_MP_INT(spi_samplelate, "BSPI late-sample flag");
+
+/* ================================================================
+ * Low-level helpers
+ * ================================================================ */
+static uint8_t dthc_crc8(const uint8_t *data, uint32_t len)
+{
+    uint8_t crc = 0x00;
+    while (len--) {
+        uint8_t i;
+        crc ^= *data++;
+        for (i = 0; i < 8; i++) {
+            if (crc & 0x80)
+                crc = (uint8_t)((crc << 1) ^ 0x07);
+            else
+                crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+static uint8_t dthc_clamp_u8(unsigned value)
+{
+    return (value > 0xFFu) ? 0xFFu : (uint8_t)value;
+}
+
+static uint16_t dthc_get_u16(const uint8_t *src)
+{
+    return (uint16_t)(((uint16_t)src[0] << 8) | (uint16_t)src[1]);
+}
+
+static uint32_t dthc_get_u32(const uint8_t *src)
+{
+    return ((uint32_t)src[0] << 24)
+         | ((uint32_t)src[1] << 16)
+         | ((uint32_t)src[2] << 8)
+         | (uint32_t)src[3];
+}
+
+static void dthc_put_u16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)(value >> 8);
+    dst[1] = (uint8_t)(value & 0xFFu);
+}
+
+static void dthc_put_u32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value >> 24);
+    dst[1] = (uint8_t)((value >> 16) & 0xFFu);
+    dst[2] = (uint8_t)((value >> 8) & 0xFFu);
+    dst[3] = (uint8_t)(value & 0xFFu);
+}
+
+static uint16_t dthc_encode_q4(double value)
+{
+    double scaled = value * 16.0;
+    if (scaled <= 0.0) return 0;
+    if (scaled >= 65535.0) return 65535u;
+    return (uint16_t)(scaled + 0.5);
+}
+
+static uint16_t dthc_encode_ms(double seconds)
+{
+    double scaled = seconds * 1000.0;
+    if (scaled <= 0.0) return 0;
+    if (scaled >= 65535.0) return 65535u;
+    return (uint16_t)(scaled + 0.5);
+}
+
+static uint16_t dthc_encode_u16(double value)
+{
+    if (value <= 0.0) return 0;
+    if (value >= 65535.0) return 65535u;
+    return (uint16_t)(value + 0.5);
+}
+
+static uint16_t dthc_encode_s16(int32_t value)
+{
+    if (value > 32767) value = 32767;
+    else if (value < -32768) value = -32768;
+    return (uint16_t)(int16_t)value;
+}
+
+/* ================================================================
+ * Frame I/O
+ * ================================================================ */
+static void dthc_build_frame(uint8_t *frame, uint8_t cmd,
+                              const uint8_t *payload, uint8_t payload_len)
+{
+    uint8_t i;
+    uint8_t frame_len = (uint8_t)(3 + payload_len);
+
+    frame[0] = DTHC_SPI_SOF;
+    frame[1] = frame_len;
+    frame[2] = cmd;
+
+    for (i = 0; i < payload_len; i++)
+        frame[3 + i] = payload[i];
+
+    frame[frame_len] = dthc_crc8(frame, frame_len);
+
+    for (i = (uint8_t)(frame_len + 1); i < DTHC_SPI_PACKET_SIZE; i++)
+        frame[i] = 0;
+}
+
+static void dthc_frame_to_tram(struct __comp_state *__comp_inst,
+                                const uint8_t *frame)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_TRAM_SLOTS; i++)
+        *tram_write[i] = ((uint32_t)frame[i*4+0] << 24)
+                       | ((uint32_t)frame[i*4+1] << 16)
+                       | ((uint32_t)frame[i*4+2] <<  8)
+                       | ((uint32_t)frame[i*4+3]);
+}
+
+static void dthc_tram_to_frame(struct __comp_state *__comp_inst,
+                                uint8_t *frame)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_TRAM_SLOTS; i++) {
+        uint32_t w = *tram_read[i];
+        frame[i*4+0] = (uint8_t)(w >> 24);
+        frame[i*4+1] = (uint8_t)(w >> 16);
+        frame[i*4+2] = (uint8_t)(w >>  8);
+        frame[i*4+3] = (uint8_t)(w >>  0);
+    }
+}
+
+static int dthc_validate_frame(const uint8_t *frame, uint8_t *cmd,
+                                const uint8_t **payload, uint8_t *payload_len)
+{
+    uint8_t frame_len;
+
+    if (frame[0] != DTHC_SPI_SOF)
+        return DTHC_FRAME_BAD_SOF;
+
+    frame_len = frame[1];
+    if (frame_len < 3 || frame_len >= DTHC_SPI_PACKET_SIZE)
+        return DTHC_FRAME_BAD_LENGTH;
+
+    if (frame[frame_len] != dthc_crc8(frame, frame_len))
+        return DTHC_FRAME_BAD_CRC;
+
+    *cmd = frame[2];
+    *payload = frame + 3;
+    *payload_len = (uint8_t)(frame_len - 3);
+    return DTHC_FRAME_OK;
+}
+
+/* ================================================================
+ * Status decode
+ * ================================================================ */
+static void dthc_apply_status(struct __comp_state *__comp_inst, uint32_t status)
+{
+    status_code = status;
+    status_fault          = (status & DTHC_STAT_FAULT)          ? 1 : 0;
+    status_delay          = (status & DTHC_STAT_DELAY)          ? 1 : 0;
+    status_tipsave_active = (status & DTHC_STAT_TIPSAVE_ACT)    ? 1 : 0;
+    status_enabled        = (status & DTHC_STAT_ENABLED)        ? 1 : 0;
+    status_tipsave_on     = (status & DTHC_STAT_TIPSAVE_ON)     ? 1 : 0;
+    status_eeread_err     = (status & DTHC_STAT_EEREAD_ERR)     ? 1 : 0;
+    status_eewrite_err    = (status & DTHC_STAT_EEWRITE_ERR)    ? 1 : 0;
+    status_arcok_on       = (status & DTHC_STAT_ARCOK_ON)       ? 1 : 0;
+    status_mtrvolt_high   = (status & DTHC_STAT_MTRVOLT_HIGH)   ? 1 : 0;
+    status_mtrvolt_low    = (status & DTHC_STAT_MTRVOLT_LOW)    ? 1 : 0;
+    status_mtrvolt_off    = (status & DTHC_STAT_MTRVOLT_OFF)    ? 1 : 0;
+    status_gecko_fault    = (status & DTHC_STAT_GECKO_FAULT)    ? 1 : 0;
+    status_eegood         = (status & DTHC_STAT_EEGOOD)         ? 1 : 0;
+    status_torch_on       = (status & DTHC_STAT_TORCH_ON)       ? 1 : 0;
+    status_hold           = (status & DTHC_STAT_HOLD)           ? 1 : 0;
+    status_up             = (status & DTHC_STAT_UP)             ? 1 : 0;
+    status_down           = (status & DTHC_STAT_DOWN)           ? 1 : 0;
+    status_mtr_external   = (status & DTHC_STAT_MTR_EXTERNAL)   ? 1 : 0;
+    status_test_mode      = (status & DTHC_STAT_TEST_MODE)      ? 1 : 0;
+    status_wd_good        = (status & DTHC_STAT_WD_GOOD)        ? 1 : 0;
+    status_as_sample_good = (status & DTHC_STAT_AS_SAMPLE_GOOD) ? 1 : 0;
+    status_as_sample_bad  = (status & DTHC_STAT_AS_SAMPLE_BAD)  ? 1 : 0;
+    status_has_autoset    = (status & DTHC_STAT_HAS_AUTOSET)    ? 1 : 0;
+    status_debug          = (status & DTHC_STAT_DEBUG)          ? 1 : 0;
+}
+
+/* ================================================================
+ * Reply parsers
+ * ================================================================ */
+
+/* CMD_DATA reply payload layout:
+ *   [0..1]   tipvolts     (u16, Q4)
+ *   [2..3]   current      (u16, Q4)
+ *   [4..7]   status_code  (u32)
+ *   [8..11]  step_delta   (s32)
+ *   [12..13] target_volts (u16, Q4)
+ *   [14]     hist_count   (u8, 0..10)
+ *   [15..]   hist_count * u16 history readings (Q4)
+ */
+static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
+                                  const uint8_t *payload, uint8_t payload_len)
+{
+    int i, count;
+
+    if (payload_len < 14) {
+        comm_bad_length++;
+        comm_bad_frames++;
+        return;
+    }
+
+    data_tip_volts   = dthc_get_u16(payload + 0)  / 16;
+    data_current     = dthc_get_u16(payload + 2)  / 16;
+    data_step_delta  = (int32_t)dthc_get_u32(payload + 8);
+    data_target_volts= dthc_get_u16(payload + 12) / 16;
+    dthc_apply_status(__comp_inst, dthc_get_u32(payload + 4));
+
+    if (payload_len >= 15) {
+        count = payload[14];
+        if (count > 10) count = 10;
+        if ((int)(payload_len - 15) < count * 2)
+            count = (payload_len - 15) / 2;
+        history_sample_count = count;
+        for (i = 0; i < count; i++)
+            history_sample(i) = (double)dthc_get_u16(payload + 15 + (i * 2)) / 16.0;
+        for (; i < 20; i++)
+            history_sample(i) = 0.0;
+    } else {
+        history_sample_count = 0;
+        for (i = 0; i < 20; i++)
+            history_sample(i) = 0.0;
+    }
+}
+
+/* CMD_CONFIG reply payload layout (42 bytes when DTHC6 FW_REV is present):
+ *   [0]      deadband          (u8)
+ *   [1..2]   delay             (u16, ms)
+ *   [3..4]   set_point         (u16, Q4)
+ *   [5..6]   upper_limit       (u16, Q4)
+ *   [7..8]   lower_limit       (u16, Q4)
+ *   [9..10]  arcok_current     (u16, Q4)
+ *   [11..12] minvel            (u16)
+ *   [13..14] Pgain             (s16)
+ *   [15..16] Igain             (s16)
+ *   [17..18] Dgain             (s16)
+ *   [19..22] steps_per_unit    (u32)
+ *   [23..26] max_up_velocity   (u32)
+ *   [27..30] acceleration      (u32)
+ *   [31]     dir_up_polarity   (u8)
+ *   [32]     step_polarity     (u8)
+ *   [33]     unit_type         (u8)
+ *   [34..37] max_down_velocity (u32)
+ *   [38..41] FW_REV            (u32, optional on older firmware)
+ */
+static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
+                                    const uint8_t *payload, uint8_t payload_len)
+{
+    if (payload_len < 38) {
+        comm_bad_length++;
+        comm_bad_frames++;
+        return;
+    }
+
+    fb_thc_deadband      = (double)payload[0]                / 16.0;
+    fb_thc_delay         = (double)dthc_get_u16(payload + 1) / 1000.0;
+    fb_thc_set_point     = dthc_get_u16(payload + 3) / 16;
+    fb_thc_upper_limit   = dthc_get_u16(payload + 5) / 16;
+    fb_thc_lower_limit   = dthc_get_u16(payload + 7) / 16;
+    fb_thc_arcok_current = dthc_get_u16(payload + 9) / 16;
+    fb_thc_minvel        = dthc_get_u16(payload + 11);
+    fb_thc_pgain         = dthc_get_u16(payload + 13);
+    fb_thc_igain         = dthc_get_u16(payload + 15);
+    fb_thc_dgain         = dthc_get_u16(payload + 17);
+
+    /* Echo writable cfg pins back from firmware so the GUI sees the
+     * initial values on startup (mirrors c3_main HAL_IO pin behaviour). */
+    cfg_thc_set_point = fb_thc_set_point;
+    cfg_thc_delay     = fb_thc_delay;
+
+    fb_motor_steps_per_unit   = dthc_get_u32(payload + 19);
+    fb_motor_max_up_velocity  = dthc_get_u32(payload + 23);
+    fb_motor_acceleration     = dthc_get_u32(payload + 27);
+    fb_motor_dir_up_polarity  = payload[31] ? 1 : 0;
+    fb_motor_step_polarity    = payload[32] ? 1 : 0;
+    fb_motor_metric_units     = payload[33] ? 1 : 0;
+    fb_motor_max_down_velocity= dthc_get_u32(payload + 34);
+    if (payload_len >= 42)
+        fw_app_rev = dthc_get_u32(payload + 38);
+
+    comm_config_valid = 1;
+}
+
+static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
+                                          const uint8_t *payload,
+                                          uint8_t payload_len)
+{
+    if (payload_len < 4) {
+        comm_bad_length++;
+        comm_bad_frames++;
+        return;
+    }
+    fb_autoset_upper_tol = (double)payload[0]                / 16.0;
+    fb_autoset_lower_tol = (double)payload[1]                / 16.0;
+    fb_autoset_delay     = (double)dthc_get_u16(payload + 2) / 1000.0;
+    comm_autosettings_valid = 1;
+
+    /* Echo writable cfg pins back from firmware so the GUI sees the
+     * confirmed values on startup. */
+    cfg_autoset_upper_tol = fb_autoset_upper_tol;
+    cfg_autoset_lower_tol = fb_autoset_lower_tol;
+}
+
+/* ================================================================
+ * Payload builders
+ * ================================================================ */
+
+/* CMD_DATA request: single control-flags byte.
+ *   bit 0 : motor_up
+ *   bit 1 : thc_enable   (unused when use_enable_pin=1)
+ *   bit 2 : reset_step_delta
+ *   bit 3 : torch_off
+ *   bit 4 : enable_autoset
+ *   bit 5 : do_autoset
+ *   bit 6 : use_enable_pin
+ *   bit 7 : motor_down
+ */
+static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
+                                       uint8_t *payload)
+{
+    uint8_t flags = 0;
+    unsigned motor_up_cmd = cmd_motor_up ? 1u : 0u;
+    unsigned motor_down_cmd = cmd_motor_down ? 1u : 0u;
+    unsigned motor_test_allowed =
+        comm_online && cmd_machine_is_on && thc_prog_is_idle &&
+        !status_torch_on && !update_enable &&
+        (update_state == DTHC_UPDATE_RUN);
+
+    /* Any inhibit or conflicting command disarms the test until both
+     * momentary inputs have been observed released.  This prevents a held
+     * GUI/HAL input from restarting motion as an interlock recovers. */
+    if (!motor_test_allowed || (motor_up_cmd && motor_down_cmd)) {
+        motor_test_armed = 0;
+    } else if (!motor_up_cmd && !motor_down_cmd) {
+        motor_test_armed = 1;
+    }
+
+    if (motor_test_allowed && motor_test_armed) {
+        if (motor_up_cmd)
+            flags |= 0x01u;
+        else if (motor_down_cmd)
+            flags |= 0x80u;
+    }
+
+    /* bit 1 (thc_enable) left 0: cmd.use-enable-pin defers control to hw */
+    if (pending_reset_step_delta) flags |= 0x04u;
+    if (cmd_torch_off)            flags |= 0x08u;
+    if (cmd_enable_autoset)       flags |= 0x10u;
+    if (pending_do_autoset)       flags |= 0x20u;
+    if (cmd_use_enable_pin)       flags |= 0x40u;
+
+    payload[0] = flags;
+
+    pending_reset_step_delta = 0;
+    pending_do_autoset = 0;
+    return 1;
+}
+
+/* CMD_CONF_SET mode 0 (THC parameters), 20 bytes:
+ *   [0]      mode = 0
+ *   [1]      deadband    (u8)
+ *   [2..3]   delay       (u16, ms) - uses auto-delay if thc.autodelay
+ *   [4..5]   set_point   (u16, Q4)
+ *   [6..7]   upper_limit (u16, Q4)
+ *   [8..9]   lower_limit (u16, Q4)
+ *   [10..11] arcok_current (u16, Q4)
+ *   [12..13] minvel      (u16)
+ *   [14..15] Pgain       (s16)
+ *   [16..17] Igain       (s16)
+ *   [18..19] Dgain       (s16)
+ */
+static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
+                                             uint8_t *payload)
+{
+    double delay_val = (thc_autodelay && thc_auto_delay > 0.0)
+                       ? thc_auto_delay : cfg_thc_delay;
+
+    payload[0] = 0;
+    payload[1] = dthc_clamp_u8(dthc_encode_q4(cfg_thc_deadband));
+    dthc_put_u16(payload + 2,  dthc_encode_ms(delay_val));
+    dthc_put_u16(payload + 4,  dthc_encode_q4((double)cfg_thc_set_point));
+    dthc_put_u16(payload + 6,  dthc_encode_q4((double)cfg_thc_upper_limit));
+    dthc_put_u16(payload + 8,  dthc_encode_q4((double)cfg_thc_lower_limit));
+    dthc_put_u16(payload + 10, dthc_encode_q4((double)cfg_thc_arcok_current));
+    dthc_put_u16(payload + 12, dthc_encode_u16((double)cfg_thc_minvel));
+    dthc_put_u16(payload + 14, dthc_encode_u16((double)cfg_thc_pgain));
+    dthc_put_u16(payload + 16, dthc_encode_u16((double)cfg_thc_igain));
+    dthc_put_u16(payload + 18, dthc_encode_u16((double)cfg_thc_dgain));
+    return 20;
+}
+
+/* CMD_CONF_SET mode 1 (motor parameters), 20 bytes:
+ *   [0]      mode = 1
+ *   [1..4]   steps_per_unit    (u32)
+ *   [5..8]   max_up_velocity   (u32)
+ *   [9..12]  acceleration      (u32)
+ *   [13]     dir_up_polarity   (u8)
+ *   [14]     step_polarity     (u8)
+ *   [15]     unit_type         (u8)
+ *   [16..19] max_down_velocity (u32)
+ */
+static uint8_t dthc_build_motor_config_payload(struct __comp_state *__comp_inst,
+                                               uint8_t *payload)
+{
+    payload[0] = 1;
+    dthc_put_u32(payload + 1,  cfg_motor_steps_per_unit);
+    dthc_put_u32(payload + 5,  cfg_motor_max_up_velocity);
+    dthc_put_u32(payload + 9,  cfg_motor_acceleration);
+    payload[13] = cfg_motor_dir_up_polarity ? 1 : 0;
+    payload[14] = cfg_motor_step_polarity   ? 1 : 0;
+    payload[15] = cfg_motor_metric_units    ? 1 : 0;
+    dthc_put_u32(payload + 16, cfg_motor_max_down_velocity);
+    return 20;
+}
+
+/* CMD_AUTOSETTINGS payload, 4 bytes */
+static uint8_t dthc_build_autosettings_payload(struct __comp_state *__comp_inst,
+                                               uint8_t *payload)
+{
+    double delay_val = (thc_auto_delay > 0.0) ? thc_auto_delay : cfg_autoset_delay;
+
+    payload[0] = dthc_clamp_u8(dthc_encode_q4(cfg_autoset_upper_tol));
+    payload[1] = dthc_clamp_u8(dthc_encode_q4(cfg_autoset_lower_tol));
+    dthc_put_u16(payload + 2, dthc_encode_ms(delay_val));
+    return 4;
+}
+
+static void dthc_queue_frame(struct __comp_state *__comp_inst, uint8_t cmd,
+                             const uint8_t *payload, uint8_t payload_len)
+{
+    dthc_build_frame(tx_frame, cmd, payload, payload_len);
+    dthc_frame_to_tram(__comp_inst, tx_frame);
+    comm_last_tx_cmd = cmd;
+}
+
+/* ================================================================
+ * Firmware update bridge
+ * ================================================================ */
+static dthc_bspi_bridge_shm_t *dthc_bridge_shm(struct __comp_state *__comp_inst)
+{
+    (void)__comp_inst;
+    return (dthc_bspi_bridge_shm_t *)bridge_shmem_ptr;
+}
+
+static void dthc_bridge_copy_to_volatile(volatile uint8_t *dst,
+                                         const uint8_t *src)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++)
+        dst[i] = src[i];
+}
+
+static void dthc_bridge_copy_from_volatile(uint8_t *dst,
+                                           const volatile uint8_t *src)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++)
+        dst[i] = src[i];
+}
+
+static int dthc_frame_has_nonzero_byte(const uint8_t *frame)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++) {
+        if (frame[i] != 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void dthc_bridge_publish(struct __comp_state *__comp_inst)
+{
+    dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
+
+    update_active = (update_state != DTHC_UPDATE_RUN) ? 1 : 0;
+    update_bridge_ready = (update_state == DTHC_UPDATE_BRIDGE_READY) ? 1 : 0;
+
+    if (shm) {
+        shm->bridge_state = update_state;
+        shm->bridge_error = update_error_code;
+    }
+}
+
+static void dthc_bridge_zero_tram(struct __comp_state *__comp_inst)
+{
+    int i;
+    for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++)
+        tx_frame[i] = 0;
+    dthc_frame_to_tram(__comp_inst, tx_frame);
+    comm_last_tx_cmd = 0;
+}
+
+static void dthc_bridge_reset_exchange(struct __comp_state *__comp_inst)
+{
+    dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
+    int i;
+
+    bridge_inflight = 0;
+    bridge_discard_next_read = 0;
+    bridge_inflight_seq = 0;
+
+    if (!shm)
+        return;
+
+    shm->response_seq = shm->request_seq;
+    shm->response_status = 0;
+    for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++) {
+        shm->request_frame[i] = 0;
+        shm->response_frame[i] = 0;
+    }
+}
+
+static void dthc_bridge_fault(struct __comp_state *__comp_inst, int error_code)
+{
+    update_state = DTHC_UPDATE_FAULT;
+    update_error_code = error_code;
+    bridge_inflight = 0;
+    bridge_discard_next_read = 0;
+    dthc_bridge_zero_tram(__comp_inst);
+    dthc_bridge_publish(__comp_inst);
+}
+
+static void dthc_bridge_enter(struct __comp_state *__comp_inst)
+{
+    dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
+
+    update_state = DTHC_UPDATE_QUIESCING;
+    update_error_code = DTHC_UPDATE_ERR_NONE;
+    dthc_bridge_publish(__comp_inst);
+
+    if (!shm) {
+        dthc_bridge_fault(__comp_inst, DTHC_UPDATE_ERR_SHMEM);
+        return;
+    }
+
+    if (hm2_bspi_clear_fifo(bspi_chan) < 0) {
+        dthc_bridge_fault(__comp_inst, DTHC_UPDATE_ERR_FIFO_CLEAR);
+        return;
+    }
+
+    dthc_bridge_reset_exchange(__comp_inst);
+    dthc_bridge_zero_tram(__comp_inst);
+
+    update_state = DTHC_UPDATE_BRIDGE_READY;
+    dthc_bridge_publish(__comp_inst);
+}
+
+static void dthc_bridge_restore(struct __comp_state *__comp_inst)
+{
+    update_state = DTHC_UPDATE_RESTORING;
+    update_bridge_ready = 0;
+    dthc_bridge_publish(__comp_inst);
+
+    if (bridge_inflight)
+        update_error_code = DTHC_UPDATE_ERR_ABORTED;
+
+    bridge_inflight = 0;
+    bridge_discard_next_read = 0;
+
+    if (hm2_bspi_clear_fifo(bspi_chan) < 0)
+        update_error_code = DTHC_UPDATE_ERR_FIFO_CLEAR;
+
+    dthc_build_frame(tx_frame, 0, 0, 0);
+    dthc_frame_to_tram(__comp_inst, tx_frame);
+    pending_config_read = 1;
+    pending_autosettings_write = 1;
+
+    if (update_error_code == DTHC_UPDATE_ERR_FIFO_CLEAR) {
+        update_state = DTHC_UPDATE_FAULT;
+    } else {
+        update_state = DTHC_UPDATE_RUN;
+        update_active = 0;
+        update_bridge_ready = 0;
+    }
+    dthc_bridge_publish(__comp_inst);
+}
+
+static int dthc_bridge_write(struct __comp_state *__comp_inst)
+{
+    dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
+    uint32_t req_seq, resp_seq;
+
+    if (!update_enable) {
+        dthc_bridge_restore(__comp_inst);
+        return 0;
+    }
+
+    if (update_state == DTHC_UPDATE_RUN)
+        dthc_bridge_enter(__comp_inst);
+
+    if (update_state == DTHC_UPDATE_FAULT) {
+        dthc_bridge_zero_tram(__comp_inst);
+        return 0;
+    }
+
+    if (!shm) {
+        dthc_bridge_fault(__comp_inst, DTHC_UPDATE_ERR_SHMEM);
+        return 0;
+    }
+
+    req_seq = shm->request_seq;
+    resp_seq = shm->response_seq;
+
+    if (bridge_inflight) {
+        if (req_seq != bridge_inflight_seq) {
+            dthc_bridge_fault(__comp_inst, DTHC_UPDATE_ERR_OVERRUN);
+            return 0;
+        }
+        /*
+         * Bootloader exchanges are intentionally half-duplex at the packet
+         * level: command frame this servo cycle, response frame on a later
+         * poll cycle.  Keep the userspace request open and clock zero frames
+         * until read() sees a valid response.
+         */
+        dthc_bridge_zero_tram(__comp_inst);
+        update_state = DTHC_UPDATE_BRIDGE_BUSY;
+        dthc_bridge_publish(__comp_inst);
+        return 0;
+    }
+
+    if (req_seq != resp_seq) {
+        dthc_bridge_copy_from_volatile(tx_frame, shm->request_frame);
+        dthc_frame_to_tram(__comp_inst, tx_frame);
+        comm_last_tx_cmd = tx_frame[2];
+        bridge_inflight = 1;
+        bridge_discard_next_read = 1;
+        bridge_inflight_seq = req_seq;
+        update_state = DTHC_UPDATE_BRIDGE_BUSY;
+    } else {
+        dthc_bridge_zero_tram(__comp_inst);
+        update_state = DTHC_UPDATE_BRIDGE_READY;
+    }
+
+    dthc_bridge_publish(__comp_inst);
+    return 0;
+}
+
+static int dthc_bridge_read(struct __comp_state *__comp_inst)
+{
+    dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
+    const uint8_t *payload = 0;
+    uint8_t cmd = 0;
+    uint8_t payload_len = 0;
+    int frame_state;
+
+    dthc_tram_to_frame(__comp_inst, rx_frame);
+
+    if (!shm || !bridge_inflight)
+        return 0;
+
+    if (bridge_discard_next_read) {
+        bridge_discard_next_read = 0;
+        return 0;
+    }
+
+    frame_state = dthc_validate_frame(rx_frame, &cmd, &payload, &payload_len);
+    (void)cmd;
+    (void)payload;
+    (void)payload_len;
+
+    if (frame_state != DTHC_FRAME_OK) {
+        /*
+         * All-zero polls are expected while the bootloader is still
+         * processing a flash command.  A malformed non-zero frame usually
+         * means the target has gone byte-shifted or returned a corrupt
+         * response.  Complete the userspace exchange with the bad frame so
+         * dthc6_fwupdater can log the raw bytes and retry instead of leaving
+         * the bridge stuck in-flight until userspace times out.
+         */
+        if (dthc_frame_has_nonzero_byte(rx_frame)) {
+            dthc_bridge_copy_to_volatile(shm->response_frame, rx_frame);
+            shm->response_status = frame_state;
+            shm->response_seq = bridge_inflight_seq;
+
+            bridge_inflight = 0;
+            bridge_discard_next_read = 0;
+            if (update_enable && update_state != DTHC_UPDATE_FAULT)
+                update_state = DTHC_UPDATE_BRIDGE_READY;
+            dthc_bridge_publish(__comp_inst);
+            return 0;
+        }
+        update_state = DTHC_UPDATE_BRIDGE_BUSY;
+        dthc_bridge_publish(__comp_inst);
+        return 0;
+    }
+
+    dthc_bridge_copy_to_volatile(shm->response_frame, rx_frame);
+    shm->response_status = frame_state;
+    shm->response_seq = bridge_inflight_seq;
+
+    bridge_inflight = 0;
+    bridge_discard_next_read = 0;
+    if (update_enable && update_state != DTHC_UPDATE_FAULT)
+        update_state = DTHC_UPDATE_BRIDGE_READY;
+    dthc_bridge_publish(__comp_inst);
+    return 0;
+}
+
+/* ================================================================
+ * Z-axis position tracking
+ * ================================================================ */
+static void dthc_update_zpos(struct __comp_state *__comp_inst)
+{
+    double spu = (fb_motor_steps_per_unit > 0)
+                 ? (double)fb_motor_steps_per_unit : 1.0;
+
+    if (!status_mtr_external) {
+        /* Firmware is controlling Z via its internal stepper */
+        thc_zcntrl_int = 1;
+        thc_zpos_out   = thc_zpos_in + ((double)data_step_delta / spu);
+    } else {
+        /* LinuxCNC is controlling Z */
+        thc_zcntrl_int = 0;
+        thc_zpos_out   = thc_zpos_in;
+    }
+
+    /* Detect the firmware handing Z back to external control */
+    if (status_mtr_external && !prev_mtr_external) {
+        /* 0 -> 1 transition: capture the accumulated offset */
+        thc_zpos_final        = (double)data_step_delta / spu;
+        thc_zsync_ready       = 1;
+        pending_reset_step_delta = 1;  /* tell firmware to reset its counter */
+        zsync_step_counter    = 1;
+    }
+    prev_mtr_external = status_mtr_external;
+
+    /* Auto-clear zpos-final after two cycles so it's a brief pulse */
+    if (zsync_step_counter) {
+        if (++zsync_step_counter > 2) {
+            thc_zpos_final     = 0.0;
+            thc_zsync_ready    = 0;
+            zsync_step_counter = 0;
+        }
+    }
+}
+
+/* ================================================================
+ * Stop-on-fault
+ * ================================================================ */
+static void dthc_update_fault(struct __comp_state *__comp_inst)
+{
+    if (status_fault) {
+        if (!thc_err_displayed) {
+            if (!thc_prog_is_idle && !ignore_scodes && thc_stop_on_fault) {
+                thc_prog_stop_out = 1;
+            }
+            thc_err_displayed = 1;
+        }
+    } else {
+        thc_prog_stop_out = 0;
+        thc_err_displayed = 0;
+    }
+}
+
+/* ================================================================
+ * THC enable toggle
+ * ================================================================ */
+static void dthc_set_enable(struct __comp_state *__comp_inst, unsigned enable)
+{
+    internal_enable  = enable ? 1 : 0;
+    thc_disable_out  = internal_enable ? 0 : 1;
+}
+
+static void dthc_update_enable_toggle(struct __comp_state *__comp_inst)
+{
+    unsigned cur = thc_enable_toggle ? 1 : 0;
+    if (cur && !prev_enable_toggle) {
+        dthc_set_enable(__comp_inst, !internal_enable);
+        thc_enable_toggle = 0;
+    }
+    prev_enable_toggle = cur;
+}
+
+/* ================================================================
+ * Manual / auto mode toggle
+ * ================================================================ */
+static void dthc_update_manual_auto(struct __comp_state *__comp_inst)
+{
+    unsigned cur = thc_manual_auto_toggle ? 1 : 0;
+    if (cur && !prev_manual_auto_toggle) {
+        ignore_scodes = !ignore_scodes;
+        thc_manual_auto_toggle = 0;
+    }
+    prev_manual_auto_toggle = cur;
+
+    thc_manual_mode = ignore_scodes ? 1 : 0;
+    thc_auto_mode   = ignore_scodes ? 0 : 1;
+}
+
+/* ================================================================
+ * Hypertherm command outputs
+ * Publishes requested current and pressure to HAL-connected consumers.
+ * Current follows the legacy S10x/S20x percentage scaling used by dthc4.
+ * ================================================================ */
+static void dthc_update_hypertherm_outputs(struct __comp_state *__comp_inst)
+{
+    uint32_t pct = plasma_current_percent ? plasma_current_percent : 10u;
+    uint64_t scaled_current = thc_current_cmd;
+
+    if (pct > 10u)
+        pct = 10u;
+    if (pct < 10u)
+        scaled_current = ((scaled_current * pct) + 5u) / 10u;
+
+    thc_hyt_current  = (uint32_t)scaled_current;
+    thc_hyt_pressure = thc_air_pressure;
+}
+
+/* ================================================================
+ * Gcode command decoder
+ * Connects to motion.analog-out-00 which carries integer command
+ * codes similar to old-style S-codes. Only acts on value changes.
+ * ================================================================ */
+static void dthc_handle_gcode_cmd(struct __comp_state *__comp_inst)
+{
+    double gcmd = thc_gcode_cmd;
+    int    icmd;
+
+    if (gcmd == last_gcode_cmd)
+        return;
+    last_gcode_cmd = gcmd;
+
+    if (gcmd < 10.0)
+        return;
+
+    icmd = (int)gcmd;
+
+    if (icmd >= 10 && icmd < 20) {
+        /* S10x: set plasma current% = x, disable THC */
+        plasma_current_percent = (unsigned)(icmd - 10);
+        if (!ignore_scodes && !dcc_thc_disable)
+            dthc_set_enable(__comp_inst, 0);
+    }
+    else if (icmd >= 20 && icmd < 30) {
+        /* S20x: set plasma current% = x, enable THC */
+        plasma_current_percent = (unsigned)(icmd - 20);
+        if (!ignore_scodes && !dcc_thc_disable)
+            dthc_set_enable(__comp_inst, 1);
+    }
+    else if (icmd >= 50 && icmd < 60) {
+        /* S50x: delay = (s - 50) / 10.0 seconds */
+        cfg_thc_delay = (gcmd - 50.0) / 10.0;
+        pending_thc_config_write = 1;
+    }
+    else if (icmd >= 500 && icmd < 600) {
+        /* S500-599: delay in tenths, clamped to 10 s */
+        cfg_thc_delay = (gcmd - 500.0) / 10.0;
+        if (cfg_thc_delay > 10.0) cfg_thc_delay = 10.0;
+        pending_thc_config_write = 1;
+    }
+    else if (icmd >= 300 && icmd < 400) {
+        /* S300-399: setpoint = s - 300 volts */
+        cfg_thc_set_point = (unsigned)(icmd - 300);
+        pending_thc_config_write = 1;
+    }
+    else if (icmd >= 3000 && icmd < 3256) {
+        /* S3000-3255: setpoint = s - 3000 volts */
+        cfg_thc_set_point = (unsigned)(icmd - 3000);
+        pending_thc_config_write = 1;
+    }
+    else if (icmd >= 400 && icmd < 500) {
+        /* S400-499: plasma current in amps */
+        thc_current_cmd = (unsigned)(icmd - 400);
+    }
+    else if (icmd >= 4000 && icmd < 4255) {
+        /* S4000-4254: plasma current in amps */
+        thc_current_cmd = (unsigned)(icmd - 4000);
+    }
+    else if (icmd >= 800 && icmd < 900) {
+        /* S800-899: air pressure command */
+        thc_air_pressure = (unsigned)(icmd - 800);
+    }
+    else if (icmd >= 8000 && icmd < 9000) {
+        /* S8000-8999: air pressure command */
+        thc_air_pressure = (unsigned)(icmd - 8000);
+    }
+    else if (icmd == 80) {
+        /* Enable autoset */
+        cmd_enable_autoset = 1;
+    }
+    else if (icmd == 81) {
+        /* One-shot autoset */
+        pending_do_autoset = 1;
+    }
+    else if (icmd == 89) {
+        /* Disable autoset */
+        cmd_enable_autoset = 0;
+    }
+    else if (icmd == 90) {
+        /* Enable THC */
+        if (!ignore_scodes)
+            dthc_set_enable(__comp_inst, 1);
+    }
+    else if (icmd == 99) {
+        /* Disable THC */
+        if (!ignore_scodes)
+            dthc_set_enable(__comp_inst, 0);
+    }
+    else if (icmd == 900) {
+        /* Enable THC + clear DCC disable */
+        dcc_thc_disable = 0;
+        if (!ignore_scodes)
+            dthc_set_enable(__comp_inst, 1);
+    }
+    else if (icmd == 999) {
+        /* Disable THC + set DCC disable */
+        dcc_thc_disable = 1;
+        if (!ignore_scodes)
+            dthc_set_enable(__comp_inst, 0);
+    }
+}
+
+/* ================================================================
+ * VAD / XY-accel auto-delay calculation
+ * ================================================================ */
+static void dthc_update_auto_delay(struct __comp_state *__comp_inst)
+{
+    unsigned vad_en  = thc_vad_enabled ? 1 : 0;
+    int      vad_pct = thc_vad_percent;
+    double   accel   = thc_xy_accel;
+
+    if (vad_en  == prev_vad_enabled &&
+        vad_pct == prev_vad_percent  &&
+        accel   == prev_xy_accel)
+        return;
+
+    prev_vad_enabled = vad_en;
+    prev_vad_percent = vad_pct;
+    prev_xy_accel    = accel;
+
+    if (accel <= 0.0)
+        return;
+
+    /* Time to reach 350 ipm (5.8333 in/s) at the given acceleration */
+    thc_auto_delay = 5.8333 / accel;
+    if (vad_en && vad_pct > 0)
+        thc_auto_delay -= thc_auto_delay * ((double)vad_pct / 100.0);
+
+    cfg_autoset_delay = thc_auto_delay;
+    pending_autosettings_write = 1;
+
+    if (thc_autodelay)
+        pending_thc_config_write = 1;
+}
+
+/* ================================================================
+ * Autosettings tolerance change detection
+ * ================================================================ */
+static void dthc_check_autosettings(struct __comp_state *__comp_inst)
+{
+    if (cfg_autoset_upper_tol != prev_aset_upper_tol ||
+        cfg_autoset_lower_tol != prev_aset_lower_tol) {
+        prev_aset_upper_tol = cfg_autoset_upper_tol;
+        prev_aset_lower_tol = cfg_autoset_lower_tol;
+        pending_autosettings_write = 1;
+    }
+}
+
+/* ================================================================
+ * write() - called each servo cycle to queue the next TX frame
+ * and run all per-cycle HAL logic.
+ * ================================================================ */
+static int write(void *subdata)
+{
+    struct __comp_state *__comp_inst = subdata;
+    uint8_t payload[DTHC_SPI_PAYLOAD_MAX];
+    uint8_t payload_len = 0;
+    uint8_t cmd = 0;
+
+    if (update_enable || update_state != DTHC_UPDATE_RUN) {
+        motor_test_armed = 0;
+        return dthc_bridge_write(__comp_inst);
+    }
+
+    /* Online countdown */
+    if (comm_online_timeout_cycles > 0) {
+        if (online_countdown > 0)
+            online_countdown--;
+        comm_online = (online_countdown > 0) ? 1 : 0;
+    } else {
+        comm_online = 0;
+    }
+
+    /* ---- Z-position (always, even offline) ---- */
+    dthc_update_zpos(__comp_inst);
+
+    /* ---- Enable toggle ---- */
+    dthc_update_enable_toggle(__comp_inst);
+
+    /* ---- Manual/auto toggle ---- */
+    dthc_update_manual_auto(__comp_inst);
+
+    /* ---- Gcode command decoding ---- */
+    dthc_handle_gcode_cmd(__comp_inst);
+
+    /* ---- Hypertherm HAL outputs ---- */
+    dthc_update_hypertherm_outputs(__comp_inst);
+
+    /* ---- Stop-on-fault ---- */
+    dthc_update_fault(__comp_inst);
+
+    /* ---- VAD / auto-delay ---- */
+    dthc_update_auto_delay(__comp_inst);
+
+    /* ---- Autosettings tolerance change ---- */
+    dthc_check_autosettings(__comp_inst);
+
+    /* ---- Edge-detect one-shot cmd.* pins ---- */
+    if (cmd_reset_step_delta && !prev_reset_step_delta)
+        pending_reset_step_delta = 1;
+    prev_reset_step_delta = cmd_reset_step_delta ? 1 : 0;
+
+    if (cmd_do_autoset && !prev_do_autoset)
+        pending_do_autoset = 1;
+    prev_do_autoset = cmd_do_autoset ? 1 : 0;
+
+    if (cmd_request_config && !prev_request_config)
+        pending_config_read = 1;
+    prev_request_config = cmd_request_config ? 1 : 0;
+
+    if (cmd_write_thc_config && !prev_write_thc_config)
+        pending_thc_config_write = 1;
+    prev_write_thc_config = cmd_write_thc_config ? 1 : 0;
+
+    if (cmd_write_motor_config && !prev_write_motor_config)
+        pending_motor_config_write = 1;
+    prev_write_motor_config = cmd_write_motor_config ? 1 : 0;
+
+    if (cmd_write_autosettings && !prev_write_autosettings)
+        pending_autosettings_write = 1;
+    prev_write_autosettings = cmd_write_autosettings ? 1 : 0;
+
+    /* ---- SPI command sequencing (highest priority first) ---- */
+    if (pending_thc_config_write) {
+        cmd = DTHC_SPI_CMD_CONF_SET;
+        payload_len = dthc_build_thc_config_payload(__comp_inst, payload);
+        pending_thc_config_write = 0;
+        pending_config_read = 1;
+    } else if (pending_motor_config_write) {
+        cmd = DTHC_SPI_CMD_CONF_SET;
+        payload_len = dthc_build_motor_config_payload(__comp_inst, payload);
+        pending_motor_config_write = 0;
+        pending_config_read = 1;
+    } else if (pending_autosettings_write) {
+        cmd = DTHC_SPI_CMD_AUTOSETTINGS;
+        payload_len = dthc_build_autosettings_payload(__comp_inst, payload);
+        pending_autosettings_write = 0;
+    } else if (pending_config_read) {
+        cmd = DTHC_SPI_CMD_CONFIG;
+        pending_config_read = 0;
+    } else {
+        cmd = DTHC_SPI_CMD_DATA;
+        payload_len = dthc_build_data_payload(__comp_inst, payload);
+    }
+
+    dthc_queue_frame(__comp_inst, cmd, payload, payload_len);
+    return 0;
+}
+
+/* ================================================================
+ * read() - called each servo cycle to parse the latest RX frame.
+ * ================================================================ */
+static int read(void *subdata)
+{
+    struct __comp_state *__comp_inst = subdata;
+    const uint8_t *payload = 0;
+    uint8_t cmd = 0;
+    uint8_t payload_len = 0;
+    int frame_state;
+
+    if (update_enable || update_state != DTHC_UPDATE_RUN)
+        return dthc_bridge_read(__comp_inst);
+
+    dthc_tram_to_frame(__comp_inst, rx_frame);
+    frame_state = dthc_validate_frame(rx_frame, &cmd, &payload, &payload_len);
+
+    if (frame_state != DTHC_FRAME_OK) {
+        comm_bad_frames++;
+        if      (frame_state == DTHC_FRAME_BAD_SOF)    comm_bad_sof++;
+        else if (frame_state == DTHC_FRAME_BAD_LENGTH)  comm_bad_length++;
+        else if (frame_state == DTHC_FRAME_BAD_CRC)     comm_bad_crc++;
+        return 0;
+    }
+
+    comm_good_frames++;
+    comm_last_rx_cmd = cmd;
+    online_countdown = comm_online_timeout_cycles;
+    comm_online = (online_countdown > 0) ? 1 : 0;
+
+    switch (cmd) {
+    case 0:
+        break;
+    case DTHC_SPI_CMD_DATA:
+        dthc_parse_data_reply(__comp_inst, payload, payload_len);
+        break;
+    case DTHC_SPI_CMD_CONFIG:
+        dthc_parse_config_reply(__comp_inst, payload, payload_len);
+        break;
+    case DTHC_SPI_CMD_AUTOSETTINGS:
+        dthc_parse_autosettings_reply(__comp_inst, payload, payload_len);
+        break;
+    default:
+        comm_unexpected_cmd++;
+        break;
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ * EXTRA_SETUP
+ * ================================================================ */
+EXTRA_SETUP()
+{
+    int i, r = 0;
+    dthc_bspi_bridge_shm_t *shm = 0;
+
+    dthc_bridge_shmem_id = -1;
+    bridge_shmem_ptr = 0;
+
+    if (bspi_chan == 0 || *bspi_chan == '\0') {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: bspi_chan must be set\n");
+        return -EINVAL;
+    }
+
+    //hm2_bspi_setup_chan(name, chan, cs, bits, mhz, delay(ns), cpol, cpha, /clear, /echo, samplelate)
+    r = hm2_bspi_setup_chan(bspi_chan, DTHC_SPI_BSPI_CHANNEL, spi_cs, 32,
+                            (spi_mhz/10.0), spi_delay_ns, spi_cpol,
+                            spi_cpha, 0, 0, spi_samplelate);
+    if (r < 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: BSPI channel setup failed on %s\n", bspi_chan);
+        return -EINVAL;
+    }
+
+    r = hm2_bspi_clear_fifo(bspi_chan);
+    if (r < 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: failed to clear BSPI FIFOs on %s\n", bspi_chan);
+        return -EINVAL;
+    }
+
+    for (i = 0; i < DTHC_SPI_TRAM_SLOTS; i++)
+        r += hm2_tram_add_bspi_frame(bspi_chan, DTHC_SPI_BSPI_CHANNEL,
+                                     &tram_write[i], &tram_read[i]);
+
+    r += hm2_allocate_bspi_tram(bspi_chan);
+    r += hm2_bspi_set_write_function(bspi_chan, &write, __comp_inst);
+    r += hm2_bspi_set_read_function(bspi_chan, &read,  __comp_inst);
+    if (r < 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: TRAM setup failed on %s\n", bspi_chan);
+        return -EINVAL;
+    }
+
+    dthc_bridge_shmem_id = rtapi_shmem_new(DTHC_BSPI_BRIDGE_SHMEM_KEY, comp_id,
+                                      sizeof(dthc_bspi_bridge_shm_t));
+    if (dthc_bridge_shmem_id < 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: failed to create DTHC6 update bridge shmem\n");
+        return -EINVAL;
+    }
+    r = rtapi_shmem_getptr(dthc_bridge_shmem_id, &bridge_shmem_ptr);
+    if (r < 0 || bridge_shmem_ptr == 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "ccc_dthc_bspi: failed to map DTHC6 update bridge shmem\n");
+        rtapi_shmem_delete(dthc_bridge_shmem_id, comp_id);
+        dthc_bridge_shmem_id = -1;
+        return -EINVAL;
+    }
+    shm = (dthc_bspi_bridge_shm_t *)bridge_shmem_ptr;
+    memset(shm, 0, sizeof(*shm));
+    shm->magic = DTHC_BSPI_BRIDGE_MAGIC;
+    shm->abi_version = DTHC_BSPI_BRIDGE_ABI;
+    shm->struct_size = sizeof(*shm);
+    shm->bridge_state = DTHC_UPDATE_RUN;
+    shm->bridge_error = DTHC_UPDATE_ERR_NONE;
+
+    /* ---- Prime TX TRAM with idle frame ---- */
+    dthc_build_frame(tx_frame, 0, 0, 0);
+    dthc_frame_to_tram(__comp_inst, tx_frame);
+
+    /*
+     * NOTE: Do NOT write to HAL pins here.  halcompile calls EXTRA_SETUP()
+     * before pins are exported, so all pin pointers are still NULL at this
+     * point.  Pins default to 0; non-zero defaults (thc.disable-out,
+     * thc.auto-mode) are set via the pin declaration's "= value" syntax.
+     *
+     * Instance variables (struct members, not pin pointers) are safe to set
+     * here.  The struct is memset to 0 before EXTRA_SETUP, so only non-zero
+     * values need explicit assignment.
+     */
+
+    /* ---- Pending command state ---- */
+    pending_config_read        = 1;  /* request config on first cycle */
+    pending_autosettings_write = 1;  /* send autosettings on first cycle */
+
+    /* ---- Gcode command ---- */
+    last_gcode_cmd         = -1.0;
+    plasma_current_percent = 10;
+
+    /* ---- Autosettings change tracking ---- */
+    prev_aset_upper_tol = -1.0;
+    prev_aset_lower_tol = -1.0;
+
+    return 0;
+}
+
+EXTRA_CLEANUP()
+{
+    if (dthc_bridge_shmem_id >= 0)
+        rtapi_shmem_delete(dthc_bridge_shmem_id, comp_id);
+}
