@@ -225,6 +225,11 @@ fi
 
 function ErrorCheck () {
     result=$?
+    if [ "${SUPPRESS_ERROR_DIALOG:-0}" = "1" ]; then
+        rm -f $DEBUG_FILE $PRINT_FILE 2>/dev/null
+        exit $result
+    fi
+
     if [ ! -z "$DISPLAY" ]; then
         echo "catch {send -async popimage destroy .}; destroy ." | @WISH@
     fi
@@ -766,6 +771,30 @@ EOF
     ;;
   esac
 fi
+
+# CommandCNC configurations using DTHC6 require an EBOB firmware image with
+# Buffered SPI support.  Check before LinuxCNC creates the lock file or starts
+# realtime/HAL so an outdated EBOB can be updated without first producing a
+# confusing HostMot2 startup failure.
+if program_available commandcnc_ebob_preflight ; then
+    commandcnc_ebob_preflight --ini "$INIFILE"
+    EBOB_PREFLIGHT_RESULT=$?
+    case $EBOB_PREFLIGHT_RESULT in
+      0) ;;
+      75)
+        echo "CommandCNC EBOB firmware preflight stopped startup." >>$PRINT_FILE
+        SUPPRESS_ERROR_DIALOG=1
+        exit $EBOB_PREFLIGHT_RESULT
+        ;;
+      *)
+        echo "CommandCNC EBOB firmware preflight failed unexpectedly (status $EBOB_PREFLIGHT_RESULT)."
+        exit $EBOB_PREFLIGHT_RESULT
+        ;;
+    esac
+else
+    echo "CommandCNC EBOB firmware preflight helper is not installed; continuing startup." >>$PRINT_FILE
+fi
+
 echo Starting LinuxCNC...
 
 # trap ^C so that it's called if user interrupts script

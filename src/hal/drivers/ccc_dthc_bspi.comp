@@ -97,8 +97,8 @@ pin in u32 cfg.motor.steps-per-unit;
 pin in u32 cfg.motor.max-up-velocity;
 pin in u32 cfg.motor.max-down-velocity;
 pin in u32 cfg.motor.acceleration;
-pin in bit cfg.motor.dir-up-polarity "High direction output = up";
-pin in bit cfg.motor.step-polarity "Active-high steps";
+pin in bit cfg.motor.dir-up-polarity "DTHC5-compatible MOTOR_REVERSE setting";
+pin in bit cfg.motor.step-polarity "DTHC5-compatible MOTOR_STEP_LOW setting (1 = active-low motor output)";
 pin in bit cfg.motor.metric-units;
 
 pin out u32 fb.motor.steps-per-unit;
@@ -676,6 +676,21 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     fb_motor_max_down_velocity= dthc_get_u32(payload + 34);
     if (payload_len >= 42)
         fw_app_rev = dthc_get_u32(payload + 38);
+
+    /* Match the DTHCIV/5 startup behavior: the configuration readback
+     * reflects what is currently stored in the DTHC, while cfg.motor.*
+     * contains the INI-backed settings that CommandCNC wants.  Send the
+     * complete motor configuration only when at least one field differs,
+     * then request another config reply to verify it (handled by write()). */
+    if ((fb_motor_steps_per_unit    != cfg_motor_steps_per_unit) ||
+        (fb_motor_max_up_velocity   != cfg_motor_max_up_velocity) ||
+        (fb_motor_max_down_velocity != cfg_motor_max_down_velocity) ||
+        (fb_motor_acceleration      != cfg_motor_acceleration) ||
+        (fb_motor_dir_up_polarity   != (cfg_motor_dir_up_polarity ? 1 : 0)) ||
+        (fb_motor_step_polarity     != (cfg_motor_step_polarity ? 1 : 0)) ||
+        (fb_motor_metric_units      != (cfg_motor_metric_units ? 1 : 0))) {
+        pending_motor_config_write = 1;
+    }
 
     comm_config_valid = 1;
 }

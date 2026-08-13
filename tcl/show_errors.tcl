@@ -116,7 +116,13 @@ pack .f2 -fill both -expand 1
 set fileID [open [lindex $argv 1] "r"]
 set file_data [read $fileID]
 close $fileID
-if [ regexp "Could not retrieve mac address" $file_data ] {
+set debugID [open [lindex $argv 0] "r"]
+set debug_data [read $debugID]
+close $debugID
+set all_error_data "$file_data\n$debug_data"
+if [ regexp -nocase {Can not find BSPI instance|ccc_dthc_bspi: BSPI channel setup failed|config defines [0-9]+ bspis, but only [0-9]+ are available} $all_error_data ] {
+    .f2.t insert end "\n***** The connected EBOB firmware does not provide DTHC6 BSPI support. *****\n\nUpdate the EBOB with /usr/share/commandcnc/ebob1.1.bit, then start CommandCNC again.\n"
+} elseif [ regexp "Could not retrieve mac address" $file_data ] {
     .f2.t insert end "\n***** Could not connect to the ethernet motion control hardware. *****\n\nPlease make sure the control box is powered on and connected before starting LinuxCNC.\n"
 } else {
     insert_file .f2.t "Print file information:" [lindex $argv 1]
