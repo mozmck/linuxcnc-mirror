@@ -14,7 +14,8 @@ the DTHC6 firmware:
 The component queues twelve 32-bit BSPI echo transfers to move the full
 48-byte packet every servo cycle. HostMot2 TRAM buffers are 32-bit wide,
 so each packet word carries four bytes. Write-side pins live under cfg.* and
-cmd.*. Readback pins live under fb.*, data.*, history.* and status.*.
+cmd.*. Readback pins live under fb.*, data.* and status.*. Voltage-history
+samples are forwarded through a private HAL stream for userspace logging.
 
 CMD_DATA requests carry a single control-flags byte (bit-packed):
   bit 0 : motor_up
@@ -26,7 +27,9 @@ CMD_DATA requests carry a single control-flags byte (bit-packed):
   bit 6 : use_enable_pin  (defer enable/disable to hardware pin)
   bit 7 : motor_down
 
-CMD_DATA replies carry inline voltage history after the base fields.
+Firmware revision 1.0 and newer CMD_DATA replies carry packed inline voltage
+history after the base fields. Each packed u16 contains Q4 volts in bits 0..13,
+ArcOK in bit 14 and torch state in bit 15.
 
 Z-axis position tracking:
   When status.mtr-external is false the firmware controls Z via its internal
@@ -121,6 +124,8 @@ pin out float fb.autoset.delay;
 /* ---- Live data from firmware ---- */
 pin out u32 data.tip-volts "Measured arc voltage in volts";
 pin out u32 data.current "Measured arc current";
+pin out float data.tip-volts-precise "Measured arc voltage with Q4 precision";
+pin out float data.current-precise "Measured arc current with Q4 precision";
 pin out u32 data.target-volts "Active target voltage";
 pin out s32 data.step-delta "Accumulated motor step delta from firmware";
 pin out u32 fw.app-rev "DTHC6 application firmware revision (FW_REV)";
@@ -152,9 +157,12 @@ pin out bit status.as-sample-bad;
 pin out bit status.has-autoset "Firmware supports autoset feature";
 pin out bit status.debug;
 
-/* ---- Voltage history (populated from each CMD_DATA reply) ---- */
-pin out u32 history.sample-count;
-pin out float history.sample.# [20];
+/* ---- Voltage logging ---- */
+pin in bit logging.enable "Forward packed firmware history to the private userspace stream";
+pin in float logging.xy-velocity-commanded "Feed-adjusted commanded XY vector velocity";
+pin in float logging.xy-velocity-realtime "Actual XY vector velocity from motion.current-vel";
+pin out bit logging.compatible "Firmware and host stream support voltage-history logging";
+pin out u32 logging.stream-overruns "Samples dropped because the userspace stream was full";
 
 /* ---- Z-axis position tracking ---- */
 pin in float thc.zpos-in "Z position input from LinuxCNC (halui.axis.z.pos-relative)";
@@ -356,6 +364,11 @@ enum {
 #define DTHC_BSPI_BRIDGE_ABI        1u
 #define DTHC_BSPI_BRIDGE_SHMEM_KEY  0xD6B5C1u
 
+#define DTHC_VOLTAGE_STREAM_KEY     0xD6B5C2u
+#define DTHC_VOLTAGE_STREAM_DEPTH   50000
+#define DTHC_VOLTAGE_STREAM_TYPES   "bbfff"
+#define DTHC_VOLTAGE_HISTORY_FW_REV 10u
+
 typedef struct {
     volatile uint32_t magic;
     volatile uint32_t abi_version;
@@ -370,6 +383,8 @@ typedef struct {
 } dthc_bspi_bridge_shm_t;
 
 static int dthc_bridge_shmem_id = -1;
+static hal_stream_t dthc_voltage_stream;
+static int dthc_voltage_stream_ready = 0;
 
 /* ================================================================
  * Module parameters
@@ -585,13 +600,14 @@ static void dthc_apply_status(struct __comp_state *__comp_inst, uint32_t status)
  *   [4..7]   status_code  (u32)
  *   [8..11]  step_delta   (s32)
  *   [12..13] target_volts (u16, Q4)
- *   [14]     hist_count   (u8, 0..10)
- *   [15..]   hist_count * u16 history readings (Q4)
+ *   [14]     hist_count   (u8, 0..14)
+ *   [15..]   hist_count * packed u16 history readings
  */
 static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
                                   const uint8_t *payload, uint8_t payload_len)
 {
     int i, count;
+    uint16_t tip_raw, current_raw;
 
     if (payload_len < 14) {
         comm_bad_length++;
@@ -599,26 +615,35 @@ static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
         return;
     }
 
-    data_tip_volts   = dthc_get_u16(payload + 0)  / 16;
-    data_current     = dthc_get_u16(payload + 2)  / 16;
+    tip_raw = dthc_get_u16(payload + 0);
+    current_raw = dthc_get_u16(payload + 2);
+    data_tip_volts   = tip_raw / 16;
+    data_current     = current_raw / 16;
+    data_tip_volts_precise = (double)tip_raw / 16.0;
+    data_current_precise = (double)current_raw / 16.0;
     data_step_delta  = (int32_t)dthc_get_u32(payload + 8);
     data_target_volts= dthc_get_u16(payload + 12) / 16;
     dthc_apply_status(__comp_inst, dthc_get_u32(payload + 4));
 
     if (payload_len >= 15) {
         count = payload[14];
-        if (count > 10) count = 10;
+        if (count > 14) count = 14;
         if ((int)(payload_len - 15) < count * 2)
             count = (payload_len - 15) / 2;
-        history_sample_count = count;
-        for (i = 0; i < count; i++)
-            history_sample(i) = (double)dthc_get_u16(payload + 15 + (i * 2)) / 16.0;
-        for (; i < 20; i++)
-            history_sample(i) = 0.0;
-    } else {
-        history_sample_count = 0;
-        for (i = 0; i < 20; i++)
-            history_sample(i) = 0.0;
+
+        if (logging_enable && logging_compatible && dthc_voltage_stream_ready) {
+            union hal_stream_data sample[5];
+            for (i = 0; i < count; i++) {
+                uint16_t packed = dthc_get_u16(payload + 15 + (i * 2));
+                sample[0].b = (packed & 0x8000u) ? 1 : 0;
+                sample[1].b = (packed & 0x4000u) ? 1 : 0;
+                sample[2].f = logging_xy_velocity_commanded;
+                sample[3].f = logging_xy_velocity_realtime;
+                sample[4].f = (double)(packed & 0x3FFFu) / 16.0;
+                if (hal_stream_write(&dthc_voltage_stream, sample) < 0)
+                    logging_stream_overruns++;
+            }
+        }
     }
 }
 
@@ -1381,6 +1406,9 @@ static int write(void *subdata)
     uint8_t payload_len = 0;
     uint8_t cmd = 0;
 
+    logging_compatible = (dthc_voltage_stream_ready &&
+                          fw_app_rev >= DTHC_VOLTAGE_HISTORY_FW_REV) ? 1 : 0;
+
     if (update_enable || update_state != DTHC_UPDATE_RUN) {
         motor_test_armed = 0;
         return dthc_bridge_write(__comp_inst);
@@ -1618,11 +1646,28 @@ EXTRA_SETUP()
     prev_aset_upper_tol = -1.0;
     prev_aset_lower_tol = -1.0;
 
+    r = hal_stream_create(&dthc_voltage_stream, comp_id,
+                          DTHC_VOLTAGE_STREAM_KEY,
+                          DTHC_VOLTAGE_STREAM_DEPTH,
+                          DTHC_VOLTAGE_STREAM_TYPES);
+    if (r < 0) {
+        dthc_voltage_stream_ready = 0;
+        rtapi_print_msg(RTAPI_MSG_WARN,
+            "ccc_dthc_bspi: voltage-history stream unavailable (%d); logging disabled\n",
+            r);
+    } else {
+        dthc_voltage_stream_ready = 1;
+    }
+
     return 0;
 }
 
 EXTRA_CLEANUP()
 {
+    if (dthc_voltage_stream_ready) {
+        hal_stream_destroy(&dthc_voltage_stream);
+        dthc_voltage_stream_ready = 0;
+    }
     if (dthc_bridge_shmem_id >= 0)
         rtapi_shmem_delete(dthc_bridge_shmem_id, comp_id);
 }
