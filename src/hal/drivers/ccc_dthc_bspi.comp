@@ -273,7 +273,7 @@ pin out u32 trace.spi-repairs "Replies resynchronised at a frame end (transmit s
 pin out u32 trace.spi-tx-underflows "Frames whose reply ran dry (board SPI handler late)";
 pin out u32 trace.spi-rx-overflows "Frames that lost a received byte (board SPI handler late)";
 pin out u32 trace.spi-timeout-resets "Partial frames abandoned and resynchronised";
-pin out u32 trace.spi-max-burst "Most received bytes waiting per SPI interrupt (4 or more: 32 us late)";
+pin out u32 trace.spi-late-frames "Frame ends handled after the next frame had begun (should stay 0)";
 pin out u32 trace.stack-peak "Deepest firmware stack use, bytes (of 2048)";
 pin out u32 trace.last-event "Last fault/hang reset: 0 none, 1 HardFault, 2 SysTick stall, 3 main-loop stall, 4 bootloader request";
 pin out u32 trace.last-event-context "Exception number running at that event (0 main loop, 15 SysTick, 16+n IRQ n)";
@@ -1279,7 +1279,7 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 12: trace_spi_tx_underflows = value; break;
         case 13: trace_spi_rx_overflows = value; break;
         case 14: trace_spi_timeout_resets = value; break;
-        case 15: trace_spi_max_burst = value; break;
+        case 15: trace_spi_late_frames = value; break;
         case 16: trace_stack_peak = value; break;
         case 17: trace_last_event = value; break;
         case 18: trace_last_event_context = value; break;
