@@ -285,6 +285,7 @@ pin out float trace.isr-max-motor-us "Longest step-timer interrupt, us";
 pin out float trace.isr-max-gpio-us "Longest GPIO/comparator interrupt, us";
 pin out float trace.isr-max-spi-us "Longest SPI interrupt, us";
 pin out float trace.isr-max-systick-us "Longest SysTick interrupt, us";
+pin out float trace.mask-max-us "Longest interrupt-masked section in the 1 ms observer service, us";
 pin out float control.feed-scale-candidate;
 pin out float control.feed-scale-applied = 1.0 "Connect only in DTHC6 plasma configurations to motion.adaptive-feed";
 
@@ -1292,6 +1293,7 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 26: trace_isr_max_gpio_us = (double)value / 10.0; break;
         case 27: trace_isr_max_spi_us = (double)value / 10.0; break;
         case 28: trace_isr_max_systick_us = (double)value / 10.0; break;
+        case 29: trace_mask_max_us = (double)value / 10.0; break;
         default: break;
         }
     }
