@@ -91,7 +91,7 @@ pin in bit cmd.write-control-profile "One-shot: stage, CRC-check and commit cfg.
 
 /* ---- Versioned observer control profile ---- */
 pin io u32 cfg.control.qualification-flags "Qualification bits: observer=1, target=2, slowdown=4";
-pin io u32 cfg.control.observer-mode "0 Legacy, 1 Shadow, 2 Active";
+pin io u32 cfg.control.observer-mode "0 Legacy, 1 Shadow, 2 Active, 3 Auto (firmware 2.3)";
 pin io u32 cfg.control.target-mode "0 Off, 1 Shadow, 2 Active";
 pin io u32 cfg.control.slowdown-mode "0 Off, 1 Shadow, 2 Active";
 pin io float cfg.control.feedforward-cap "Maximum fraction of w-hat applied in Observer Active";
@@ -125,6 +125,13 @@ pin io float cfg.control.slowdown-min-conf;
 pin io u32 cfg.control.slowdown-delay-ms;
 pin io u32 cfg.control.slowdown-min-on-ms;
 pin io u32 cfg.control.slowdown-timeout-ms;
+/* Auto law, profile version 4 (firmware 2.3). */
+pin io u32 cfg.control.loop-delay-ms "Auto: voltage-to-Z loop delay used to derive every gain";
+pin io float cfg.control.brake-accel-fraction "Auto: fraction of Z acceleration the recovery curve brakes with";
+pin io u32 cfg.control.auto-flags "Auto: 1 kerf hold, 2 use the measured loop delay";
+pin io float cfg.control.kerf-threshold "Auto: unexplained voltage rise (V) that holds downward motion";
+pin io u32 cfg.control.kerf-hold-max-ms "Auto: longest kerf/edge hold";
+pin io float cfg.control.transition-error-mm "Auto: point-10 error budget for an abrupt end of slope; 0 disables";
 pin out bit fb.profile.valid;
 pin out bit fb.profile.provisional;
 pin out bit fb.profile.fault;
@@ -136,6 +143,7 @@ pin out u32 fb.profile.read-sequence "Increments after a complete CRC-checked pr
 
 /* ---- THC tuning parameters (input from INI or GUI) ---- */
 pin in float cfg.thc.deadband "Deadband in volts";
+pin in s32 cfg.thc.response-trim "Auto law response: -1 Smoother, 0 Auto, 1 Tighter (firmware 2.3)";
 pin io float cfg.thc.delay "Delay in seconds (writable so gcode-cmd S5xx can update it)";
 pin io u32 cfg.thc.set-point "Set point in volts (writable so gcode-cmd S3xx can update it)";
 pin in u32 cfg.thc.upper-limit "Upper fault limit in volts";
@@ -148,6 +156,7 @@ pin in u32 cfg.thc.dgain "D gain";
 
 /* ---- THC tuning readback from firmware ---- */
 pin out float fb.thc.deadband;
+pin out s32 fb.thc.response-trim;
 pin out float fb.thc.delay;
 pin out u32 fb.thc.set-point;
 pin out u32 fb.thc.upper-limit;
@@ -245,6 +254,37 @@ pin out float trace.realized-mm-s;
 pin out float trace.confidence;
 pin out float trace.load;
 pin out float trace.rxy;
+pin out bit trace.kerf-hold "Auto: downward motion held for a kerf or edge";
+pin out float trace.slope "Learned surface slope (rise/run) at actual XY speed";
+/* Trace v3 diagnostic slot, refreshed in turn (firmware 2.3). */
+pin out u32 trace.compute-max-us "Worst 1 ms observer step time, us, including interrupts";
+pin out u32 trace.late-discards "Observer results discarded as late";
+pin out u32 trace.late-overwrites "Observer samples overwritten before they started";
+pin out u32 trace.kerf-holds "Kerf/edge holds since power-up";
+pin out u32 trace.bandwidth "Auto observer bandwidth in rad/s";
+pin out u32 trace.loop-delay-ms "Auto loop delay in use";
+pin out float trace.noise-mm "Measured gap noise, one sigma";
+pin out float trace.delay-estimate "Measured realized-Z-to-voltage delay, ms";
+pin out float trace.arc-gain "Measured arc V/mm relative to 1/0.127 (1.0 = as assumed)";
+pin out u32 trace.ident-fits "Delay/arc-gain identification windows accepted";
+/* Firmware 2.3 diagnostic build: link and fault diagnostics.  Counts are
+ * since board power-up; they reset only with power. */
+pin out u32 trace.spi-repairs "Replies resynchronised at a frame end (transmit side out of step)";
+pin out u32 trace.spi-tx-underflows "Frames whose reply ran dry (board SPI handler late)";
+pin out u32 trace.spi-rx-overflows "Frames that lost a received byte (board SPI handler late)";
+pin out u32 trace.spi-timeout-resets "Partial frames abandoned and resynchronised";
+pin out u32 trace.spi-max-burst "Most received bytes waiting per SPI interrupt (4 or more: 32 us late)";
+pin out u32 trace.stack-peak "Deepest firmware stack use, bytes (of 2048)";
+pin out u32 trace.last-event "Last fault/hang reset: 0 none, 1 HardFault, 2 SysTick stall, 3 main-loop stall, 4 bootloader request";
+pin out u32 trace.last-event-context "Exception number running at that event (0 main loop, 15 SysTick, 16+n IRQ n)";
+pin out u32 trace.last-event-pc "Code address at that event";
+pin out u32 trace.last-event-lr "Return address at that event";
+pin out u32 trace.event-count "Fault/hang resets since power-up";
+pin out u32 trace.load-fw-rejects "Bootloader requests refused (torch on or malformed)";
+pin out float trace.isr-max-motor-us "Longest step-timer interrupt, us";
+pin out float trace.isr-max-gpio-us "Longest GPIO/comparator interrupt, us";
+pin out float trace.isr-max-spi-us "Longest SPI interrupt, us";
+pin out float trace.isr-max-systick-us "Longest SysTick interrupt, us";
 pin out float control.feed-scale-candidate;
 pin out float control.feed-scale-applied = 1.0 "Connect only in DTHC6 plasma configurations to motion.adaptive-feed";
 
@@ -341,7 +381,7 @@ variable unsigned profile_request_started;
 variable unsigned trace_cycle;
 variable unsigned trace_age_cycles;
 variable uint32_t host_sample_sequence;
-variable uint8_t profile_bytes[72];
+variable uint8_t profile_bytes[81];
 
 /* ---- Online countdown ---- */
 variable unsigned online_countdown;
@@ -385,6 +425,7 @@ variable double prev_xy_accel;
 
 /* ---- Autosettings change tracking ---- */
 variable double prev_aset_upper_tol;
+variable int prev_response_trim;
 variable double prev_aset_lower_tol;
 
 /* ---- Firmware update bridge state ---- */
@@ -483,7 +524,11 @@ enum {
 #define DTHC_OBSERVER_FW_REV        20u
 /* Firmware 2.2 removed the fixed 0.127 mm/V scale from the profile. */
 #define DTHC_PROFILE_FW_REV         22u
-#define DTHC_PROFILE_BYTES          72u
+#define DTHC_PROFILE_V3_BYTES       72u
+/* Firmware 2.3: Auto law, profile version 4, response trim, trace v3. */
+#define DTHC_AUTO_FW_REV            23u
+#define DTHC_PROFILE_V4_BYTES       81u
+#define DTHC_PROFILE_BYTES          dthc_profile_length(__comp_inst)
 #define DTHC_PROFILE_PAGE_BYTES     28u
 #define DTHC_PROFILE_PAGE_COUNT     3u
 
@@ -926,6 +971,8 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     fb_motor_max_down_velocity= dthc_get_u32(payload + 34);
     if (payload_len >= 42)
         fw_app_rev = dthc_get_u32(payload + 38);
+    if (payload_len >= 43)
+        fb_thc_response_trim = (int8_t)payload[42];
     if ((fw_app_rev >= DTHC_PROFILE_FW_REV) && !profile_request_started) {
         profile_action = DTHC_PROFILE_READ;
         profile_page = 0u;
@@ -971,6 +1018,13 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
     cfg_autoset_lower_tol = fb_autoset_lower_tol;
 }
 
+/* Firmware 2.3 appends the Auto fields (profile version 4). */
+static uint32_t dthc_profile_length(struct __comp_state *__comp_inst)
+{
+    return (fw_app_rev >= DTHC_AUTO_FW_REV) ? DTHC_PROFILE_V4_BYTES :
+                                              DTHC_PROFILE_V3_BYTES;
+}
+
 static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 {
     cfg_control_qualification_flags = dthc_get_u16(profile_bytes + 4);
@@ -1010,6 +1064,16 @@ static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
     cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 66);
     cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 68);
     cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 70);
+    if (DTHC_PROFILE_BYTES >= DTHC_PROFILE_V4_BYTES) {
+        cfg_control_loop_delay_ms = profile_bytes[72];
+        cfg_control_brake_accel_fraction = (double)profile_bytes[73] / 256.0;
+        cfg_control_auto_flags = profile_bytes[74];
+        cfg_control_kerf_threshold =
+            (double)dthc_get_u16(profile_bytes + 75) / 16.0;
+        cfg_control_kerf_hold_max_ms = dthc_get_u16(profile_bytes + 77);
+        cfg_control_transition_error_mm =
+            (double)dthc_get_u16(profile_bytes + 79) / 1000.0;
+    }
     fb_profile_generation = dthc_get_u32(profile_bytes + 0);
     fb_profile_length = DTHC_PROFILE_BYTES;
     fb_profile_valid = 1;
@@ -1022,7 +1086,9 @@ static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
     dthc_put_u16(profile_bytes + 4,
         (uint16_t)(cfg_control_qualification_flags & 0xffffu));
     mode = cfg_control_observer_mode;
-    profile_bytes[6] = (mode > 2u) ? 0u : (uint8_t)mode;
+    if (mode > ((fw_app_rev >= DTHC_AUTO_FW_REV) ? 3u : 2u))
+        mode = 0u;
+    profile_bytes[6] = (uint8_t)mode;
     mode = cfg_control_target_mode;
     profile_bytes[7] = (mode > 2u) ? 1u : (uint8_t)mode;
     mode = cfg_control_slowdown_mode;
@@ -1074,6 +1140,19 @@ static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
         dthc_encode_u16(cfg_control_slowdown_min_on_ms));
     dthc_put_u16(profile_bytes + 70,
         dthc_encode_u16(cfg_control_slowdown_timeout_ms));
+    if (DTHC_PROFILE_BYTES >= DTHC_PROFILE_V4_BYTES) {
+        double brake = cfg_control_brake_accel_fraction * 256.0 + 0.5;
+        profile_bytes[72] = dthc_clamp_u8(cfg_control_loop_delay_ms);
+        profile_bytes[73] = (brake < 1.0) ? 1u :
+                            (brake > 255.0) ? 255u : (uint8_t)brake;
+        profile_bytes[74] = dthc_clamp_u8(cfg_control_auto_flags);
+        dthc_put_u16(profile_bytes + 75,
+            dthc_encode_q4(cfg_control_kerf_threshold));
+        dthc_put_u16(profile_bytes + 77,
+            dthc_encode_u16(cfg_control_kerf_hold_max_ms));
+        dthc_put_u16(profile_bytes + 79,
+            dthc_encode_u16(cfg_control_transition_error_mm * 1000.0));
+    }
 }
 
 static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
@@ -1152,7 +1231,8 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
                                    const uint8_t *payload,
                                    uint8_t payload_len)
 {
-    if ((payload_len < 41u) || (payload[0] != 2u)) {
+    if ((payload_len < 41u) || (payload[0] < 2u) || (payload[0] > 3u) ||
+        ((payload[0] == 3u) && (payload_len < 44u))) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
@@ -1174,6 +1254,47 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
     trace_feedforward_mm_s = (double)dthc_get_s24(payload + 32) / 1000.0;
     trace_request_mm_s = (double)dthc_get_s24(payload + 35) / 1000.0;
     trace_realized_mm_s = (double)dthc_get_s24(payload + 38) / 1000.0;
+    trace_kerf_hold = (trace_reason & 0x0100u) ? 1 : 0;
+    {
+        double xy_mm_s = logging_xy_velocity_realtime *
+                         (cfg_motor_metric_units ? 1.0 : 25.4);
+        trace_slope = (xy_mm_s > 0.1) ? trace_w_hat_mm_s / xy_mm_s : 0.0;
+    }
+    if (payload[0] >= 3u) {
+        uint32_t value = dthc_get_u16(payload + 42);
+        switch (payload[41]) {
+        case 0: trace_compute_max_us = value; break;
+        case 1: trace_late_discards = value; break;
+        case 2: trace_late_overwrites = value; break;
+        case 3: trace_kerf_holds = value; break;
+        case 4: trace_bandwidth = value; break;
+        case 5: trace_loop_delay_ms = value; break;
+        case 6: break; /* response trim; fb.thc.response-trim has it */
+        case 7: trace_noise_mm = (double)value / 1000.0; break;
+        case 8: trace_delay_estimate = (double)value / 10.0; break;
+        case 9: trace_arc_gain = (double)value / 256.0; break;
+        case 10: trace_ident_fits = value; break;
+        case 11: trace_spi_repairs = value; break;
+        case 12: trace_spi_tx_underflows = value; break;
+        case 13: trace_spi_rx_overflows = value; break;
+        case 14: trace_spi_timeout_resets = value; break;
+        case 15: trace_spi_max_burst = value; break;
+        case 16: trace_stack_peak = value; break;
+        case 17: trace_last_event = value; break;
+        case 18: trace_last_event_context = value; break;
+        case 19: trace_last_event_pc = (trace_last_event_pc & 0xffff0000u) | value; break;
+        case 20: trace_last_event_pc = (trace_last_event_pc & 0x0000ffffu) | (value << 16); break;
+        case 21: trace_last_event_lr = (trace_last_event_lr & 0xffff0000u) | value; break;
+        case 22: trace_last_event_lr = (trace_last_event_lr & 0x0000ffffu) | (value << 16); break;
+        case 23: trace_event_count = value; break;
+        case 24: trace_load_fw_rejects = value; break;
+        case 25: trace_isr_max_motor_us = (double)value / 10.0; break;
+        case 26: trace_isr_max_gpio_us = (double)value / 10.0; break;
+        case 27: trace_isr_max_spi_us = (double)value / 10.0; break;
+        case 28: trace_isr_max_systick_us = (double)value / 10.0; break;
+        default: break;
+        }
+    }
     /* Publish tick after the rest of the snapshot for userspace recorders. */
     trace_tick = dthc_get_u32(payload + 4);
     trace_age_cycles = 0u;
@@ -1241,8 +1362,13 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
     if (thc_vad_enabled && !thc_prog_is_idle &&
         (logging_xy_velocity_commanded > 0.000001) &&
         (logging_xy_velocity_realtime >= 0.0)) {
-        double ratio = logging_xy_velocity_realtime /
-                       logging_xy_velocity_commanded;
+        /* Our own point-10 slowdown is not a corner: compare against the
+         * commanded speed it asked LinuxCNC for. */
+        double expected = logging_xy_velocity_commanded;
+        if ((control_feed_scale_applied > 0.0) &&
+            (control_feed_scale_applied < 1.0))
+            expected *= control_feed_scale_applied;
+        double ratio = logging_xy_velocity_realtime / expected;
 
         if (ratio <= 0.0)
             payload[1] = 0u;
@@ -1308,6 +1434,7 @@ static uint8_t dthc_build_profile_payload(struct __comp_state *__comp_inst,
  *   [14..15] Pgain       (s16)
  *   [16..17] Igain       (s16)
  *   [18..19] Dgain       (s16)
+ *   [20]     Auto response trim (s8: -1, 0, 1), firmware 2.3 and later
  */
 static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
                                              uint8_t *payload)
@@ -1326,6 +1453,11 @@ static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
     dthc_put_u16(payload + 14, dthc_encode_u16((double)cfg_thc_pgain));
     dthc_put_u16(payload + 16, dthc_encode_u16((double)cfg_thc_igain));
     dthc_put_u16(payload + 18, dthc_encode_u16((double)cfg_thc_dgain));
+    if (fw_app_rev >= DTHC_AUTO_FW_REV) {
+        int trim = cfg_thc_response_trim;
+        payload[20] = (uint8_t)(int8_t)((trim < -1) ? -1 : (trim > 1) ? 1 : trim);
+        return 21;
+    }
     return 20;
 }
 
@@ -1894,6 +2026,14 @@ static void dthc_check_autosettings(struct __comp_state *__comp_inst)
         prev_aset_lower_tol = cfg_autoset_lower_tol;
         pending_autosettings_write = 1;
     }
+    /* The response trim travels with the THC config (firmware 2.3); send
+     * it whenever the panel changes it, once the firmware revision is
+     * known. */
+    if (comm_config_valid && (fw_app_rev >= DTHC_AUTO_FW_REV) &&
+        (cfg_thc_response_trim != prev_response_trim)) {
+        prev_response_trim = cfg_thc_response_trim;
+        pending_thc_config_write = 1;
+    }
 }
 
 /* ================================================================
@@ -2213,6 +2353,7 @@ EXTRA_SETUP()
     /* ---- Autosettings change tracking ---- */
     prev_aset_upper_tol = -1.0;
     prev_aset_lower_tol = -1.0;
+    prev_response_trim = 0x7fffffff;  /* send the panel's trim once */
 
     r = hal_stream_create(&dthc_voltage_stream, comp_id,
                           DTHC_VOLTAGE_STREAM_KEY,
