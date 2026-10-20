@@ -7,7 +7,7 @@ license "GPLv2 or greater";
 option singleton yes;
 
 pin in float current_vel        "Value being compared - motion.current-vel";
-pin in float requested_vel      "Reference value - motion.requested-vel";
+pin in float requested_vel      "Reference value - the programmed feed (motion.feed-*-per-second); its last non-zero value is held while a program runs, through feed holds and rapids";
 pin in float upper_vel_pct      "Percentage of requested-vel below which we start reducing output power - must be between 0.0 and 100.0";
 pin in float lower_vel_pct      "Percentage of requested-vel below which we leave output power at min_pwr_pct - must be between 0.0 and 100.0";
 pin in float min_pwr_pct       "lowest output power as percentage of pwm_in";
@@ -23,6 +23,8 @@ variable double velocity_ratio_pct;
 variable double vel_range;
 variable double pwr_range;
 variable double vel_offset;
+variable double reference_vel;
+variable double last_requested_vel;
 
 //int power, int current_velocity, int requested_velocity, int minpwr, int upper_vel_pct, int lower_vel_pct
 
@@ -48,11 +50,21 @@ function _ fp "Update output based on inputs";
  */
 FUNCTION(_)
 {
+    // The programmed feed drops to 0 during rapids and while feed hold or
+    // feed inhibit stops the machine.  Hold its last non-zero value while the
+    // program runs, so a stop under feed hold lowers power instead of
+    // reading as "no reference" (full power).
+    if (prog_is_idle)
+        last_requested_vel = 0.0;
+    else if (requested_vel > 0.0)
+        last_requested_vel = requested_vel;
+    reference_vel = (requested_vel > 0.0) ? requested_vel : last_requested_vel;
+
     // Calculate velocity ratio as a percentage (0-100+)
-    // If requested_velocity is 0, return minimum power to avoid division by zero
-    if (enable && !prog_is_idle && (requested_vel > 0.0))
+    // With no reference yet, pass the power through unchanged
+    if (enable && !prog_is_idle && (reference_vel > 0.0))
     {
-        velocity_ratio_pct = (current_vel * 100.0) / requested_vel;
+        velocity_ratio_pct = (current_vel * 100.0) / reference_vel;
         
         // Clamp velocity ratio to the operating range
         // Upper threshold: at or above upper_vel_pct, output 100%
