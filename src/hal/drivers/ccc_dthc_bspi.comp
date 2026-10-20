@@ -354,6 +354,7 @@ pin out u32 update.state "Firmware update state: 0 RUN, 1 QUIESCING, 2 BRIDGE_RE
 pin out s32 update.error-code "Firmware update bridge error: 0 none, 1 FIFO clear, 2 shmem, 3 overrun, 4 transfer, 5 aborted";
 
 param rw u32 comm.online-timeout-cycles = 100 "Servo cycles to keep comm.online after last good frame";
+param rw bit logging.feed-includes-adaptive = 0 "logging.xy-velocity-commanded is the programmed feed (motion.feed-*-per-second), which already includes motion.adaptive-feed";
 
 option extra_setup yes;
 option extra_cleanup yes;
@@ -1360,16 +1361,25 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
      * firmware receives a proportionally softer response.  The existing
      * thcenable path remains the hard VAD backstop.  Missing/invalid velocity
      * nets fail to 255 so old generated configurations are unaffected. */
+    /* Point 10's own slowdown is not a corner.  "expected" is the speed
+     * LinuxCNC was asked for, including that slowdown; "nominal" is the feed
+     * without it, which the firmware's point 10 needs.  Newer configurations
+     * feed the programmed feed, which already includes adaptive feed; older
+     * ones feed motion.requested-vel x feed override, which does not. */
+    double point10_scale = ((control_feed_scale_applied > 0.0) &&
+                            (control_feed_scale_applied < 1.0)) ?
+                           control_feed_scale_applied : 1.0;
+    if (point10_scale < 0.05)
+        point10_scale = 0.05;
+    double nominal_feed = logging_xy_velocity_commanded;
+    if (logging_feed_includes_adaptive)
+        nominal_feed /= point10_scale;
+    double expected = nominal_feed * point10_scale;
+
     payload[1] = 255u;
     if (thc_vad_enabled && !thc_prog_is_idle &&
         (logging_xy_velocity_commanded > 0.000001) &&
         (logging_xy_velocity_realtime >= 0.0)) {
-        /* Our own point-10 slowdown is not a corner: compare against the
-         * commanded speed it asked LinuxCNC for. */
-        double expected = logging_xy_velocity_commanded;
-        if ((control_feed_scale_applied > 0.0) &&
-            (control_feed_scale_applied < 1.0))
-            expected *= control_feed_scale_applied;
         double ratio = logging_xy_velocity_realtime / expected;
 
         if (ratio <= 0.0)
@@ -1390,7 +1400,7 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
             runtime_flags |= 0x0Eu; /* tick-anchored history with sampled THC enable */
         payload[2] = runtime_flags;
         dthc_put_u32(payload + 3,
-            dthc_encode_uq16(logging_xy_velocity_commanded * 60.0));
+            dthc_encode_uq16(nominal_feed * 60.0));
         dthc_put_u32(payload + 7,
             dthc_encode_uq16(logging_xy_velocity_realtime * 60.0));
         dthc_put_u32(payload + 11, ++host_sample_sequence);
