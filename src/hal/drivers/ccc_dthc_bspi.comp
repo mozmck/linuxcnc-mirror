@@ -113,10 +113,14 @@ pin io u32 cfg.control.conf-evidence-ms;
 pin io float cfg.control.vad-down-min;
 pin io float cfg.control.vad-lock;
 pin io float cfg.control.vad-unlock;
-pin io float cfg.control.target-k "Universal point-9 target coefficient";
+/* Point-9 model dV = C (x - 1), C = C_ref (F_ref / F)^e: profile version 5
+ * (firmware 2.4). Older firmware keeps its bytes; these read 0 there. */
+pin io float cfg.control.target-c-ref "Point-9 C at the reference feed, volts";
 pin io float cfg.control.target-max-offset "Maximum point-9 voltage offset";
-pin io float cfg.control.target-filter;
-pin io float cfg.control.target-slew-volts-s;
+pin io u32 cfg.control.target-feed-ref "Point-9 reference feed F_ref, mm/min";
+pin io float cfg.control.target-feed-exponent "Point-9 feed exponent e; 0 holds C fixed";
+pin io float cfg.control.target-lead-mm "Point-9 kerf-front lead L, mm";
+pin io float cfg.control.target-cutoff "XY ratio below which point 9 would hold the THC";
 pin io float cfg.control.slowdown-min-scale "Minimum point-10 adaptive-feed recommendation";
 pin io float cfg.control.slowdown-z-margin;
 pin io float cfg.control.slowdown-attack;
@@ -255,6 +259,7 @@ pin out float trace.confidence;
 pin out float trace.load;
 pin out float trace.rxy;
 pin out bit trace.kerf-hold "Auto: downward motion held for a kerf or edge";
+pin out bit trace.target-cutoff "Point 9 would hold the THC now (firmware 2.4; reported only)";
 pin out float trace.slope "Learned surface slope (rise/run) at actual XY speed";
 /* Trace v3 diagnostic slot, refreshed in turn (firmware 2.3). */
 pin out u32 trace.compute-max-us "Worst 1 ms observer step time, us, including interrupts";
@@ -530,6 +535,9 @@ enum {
 /* Firmware 2.3: Auto law, profile version 4, response trim, trace v3. */
 #define DTHC_AUTO_FW_REV            23u
 #define DTHC_PROFILE_V4_BYTES       81u
+/* Firmware 2.4: profile version 5, still 81 bytes. The point-9 kerf-front
+ * model reuses bytes 51-53, 56-59 and 65, which held the linear model. */
+#define DTHC_TARGET_MODEL_FW_REV    24u
 #define DTHC_PROFILE_BYTES          dthc_profile_length(__comp_inst)
 #define DTHC_PROFILE_PAGE_BYTES     28u
 #define DTHC_PROFILE_PAGE_COUNT     3u
@@ -1052,12 +1060,24 @@ static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
     cfg_control_vad_down_min = (double)profile_bytes[48] / 255.0;
     cfg_control_vad_lock = (double)profile_bytes[49] / 255.0;
     cfg_control_vad_unlock = (double)profile_bytes[50] / 255.0;
-    cfg_control_target_k = (double)dthc_get_u16(profile_bytes + 52) / 65536.0;
     cfg_control_target_max_offset =
         (double)dthc_get_u16(profile_bytes + 54) / 16.0;
-    cfg_control_target_filter = (double)dthc_get_u16(profile_bytes + 56) / 65536.0;
-    cfg_control_target_slew_volts_s =
-        (double)dthc_get_u16(profile_bytes + 58) / 16.0;
+    if (fw_app_rev >= DTHC_TARGET_MODEL_FW_REV) {
+        cfg_control_target_feed_exponent = (double)profile_bytes[51] / 100.0;
+        cfg_control_target_c_ref =
+            (double)dthc_get_u16(profile_bytes + 52) / 1000.0;
+        cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 56);
+        cfg_control_target_lead_mm =
+            (double)dthc_get_u16(profile_bytes + 58) / 1000.0;
+        cfg_control_target_cutoff = (double)profile_bytes[65] / 255.0;
+    } else {
+        /* The linear model's bytes are not shown; a write keeps them. */
+        cfg_control_target_feed_exponent = 0.0;
+        cfg_control_target_c_ref = 0.0;
+        cfg_control_target_feed_ref = 0u;
+        cfg_control_target_lead_mm = 0.0;
+        cfg_control_target_cutoff = 0.0;
+    }
     cfg_control_slowdown_min_scale = (double)profile_bytes[60] / 255.0;
     cfg_control_slowdown_z_margin = (double)profile_bytes[61] / 255.0;
     cfg_control_slowdown_attack = (double)profile_bytes[62] / 255.0;
@@ -1123,14 +1143,19 @@ static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
     profile_bytes[48] = dthc_encode_fraction_q8(cfg_control_vad_down_min);
     profile_bytes[49] = dthc_encode_fraction_q8(cfg_control_vad_lock);
     profile_bytes[50] = dthc_encode_fraction_q8(cfg_control_vad_unlock);
-    dthc_put_u16(profile_bytes + 52,
-        dthc_encode_u16(cfg_control_target_k * 65536.0));
     dthc_put_u16(profile_bytes + 54,
         dthc_encode_q4(cfg_control_target_max_offset));
-    dthc_put_u16(profile_bytes + 56,
-        dthc_encode_u16(cfg_control_target_filter * 65536.0));
-    dthc_put_u16(profile_bytes + 58,
-        dthc_encode_q4(cfg_control_target_slew_volts_s));
+    if (fw_app_rev >= DTHC_TARGET_MODEL_FW_REV) {
+        profile_bytes[51] = dthc_clamp_u8(
+            dthc_encode_u16(cfg_control_target_feed_exponent * 100.0));
+        dthc_put_u16(profile_bytes + 52,
+            dthc_encode_u16(cfg_control_target_c_ref * 1000.0));
+        dthc_put_u16(profile_bytes + 56,
+            dthc_encode_u16(cfg_control_target_feed_ref));
+        dthc_put_u16(profile_bytes + 58,
+            dthc_encode_u16(cfg_control_target_lead_mm * 1000.0));
+        profile_bytes[65] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
+    }
     profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_min_scale);
     profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
     profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
@@ -1257,6 +1282,7 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
     trace_request_mm_s = (double)dthc_get_s24(payload + 35) / 1000.0;
     trace_realized_mm_s = (double)dthc_get_s24(payload + 38) / 1000.0;
     trace_kerf_hold = (trace_reason & 0x0100u) ? 1 : 0;
+    trace_target_cutoff = (trace_reason & 0x0200u) ? 1 : 0;
     {
         double xy_mm_s = logging_xy_velocity_realtime *
                          (cfg_motor_metric_units ? 1.0 : 25.4);
