@@ -27,25 +27,30 @@ CMD_DATA requests carry a control-flags byte (bit-packed):
   bit 6 : use_enable_pin  (defer enable/disable to hardware pin)
   bit 7 : motor_down
 
-Firmware revision 1.1 and newer accepts an optional second CMD_DATA byte:
-  byte 1: XY-derived response scale, 0..255 (255 = established full response)
+The driver speaks one firmware revision, DTHC_FW_REV (fw.required-rev).
+Until the board reports exactly that revision, it only reads the
+configuration (to learn the revision), holds the THC off through
+thc.disable-out, reports fw.version-ok false and logs the mismatch; the
+firmware update bridge still works.
 
-When velocity anti-dive is enabled and a commanded XY velocity is available,
-the component derives this scale from actual / commanded XY velocity. Older
-firmware ignores the extra byte; older one-byte hosts leave revision 1.1
-firmware at its backward-compatible full response.
+CMD_DATA requests are 18 bytes:
+  byte 0      control flags (above)
+  byte 1      XY response scale, actual / programmed feed, 0..255
+              (255 while VAD is off or the program is idle)
+  byte 2      runtime flags: 0x01 XY velocity valid, 0x0E voltage history
+  bytes 3-6   nominal XY feed, units/min Q16.16 (point 10's scale removed)
+  bytes 7-10  actual XY speed, units/min Q16.16
+  bytes 11-14 host sample sequence
+  byte 15     speed hold: 0 host thcenable, 1 firmware VAD, 2 Auto VAD
+  byte 16     VAD percent
+  byte 17     point 10's applied feed scale, Q8
 
-Firmware revision 2.0 appends runtime validity, commanded/actual scalar XY
-velocity, and a host sequence number after those two legacy bytes. It also
-adds paged profile and observer-trace commands. High-rate voltage history is
-requested only while logging.enable is true; normal operation uses trace
-telemetry instead.
-
-Firmware revision 1.0 and newer CMD_DATA replies carry packed inline voltage
-history after the base fields. Each packed u16 contains Q4 volts in bits 0..13,
-ArcOK in bit 14 and torch state in bit 15. Revision 2.1's version-3 history
-uses bit 13 for sampled THC enable and bits 0..12 for voltage; older responses
-keep the original voltage range.
+With VAD on, a program running and thc.vad-mode 1 or 2, the firmware holds Z
+itself, and once its trace confirms the mode, thc.host-vad-enable turns
+thcenable's speed gate off; external disables still work.  High-rate voltage
+history is requested only while logging.enable is true; normal operation
+uses trace telemetry.  Each history sample packs Q4 volts in bits 0..12,
+sampled THC enable in bit 13, ArcOK in bit 14 and torch state in bit 15.
 
 Z-axis position tracking:
   When status.mtr-external is false the firmware controls Z via its internal
@@ -90,8 +95,7 @@ pin in bit cmd.request-control-profile "One-shot: read the versioned observer co
 pin in bit cmd.write-control-profile "One-shot: stage, CRC-check and commit cfg.control.* while torch off and program idle";
 
 /* ---- Versioned observer control profile ---- */
-pin io u32 cfg.control.qualification-flags "Qualification bits: observer=1, target=2, slowdown=4";
-pin io u32 cfg.control.observer-mode "0 Legacy, 1 Shadow, 2 Active, 3 Auto (firmware 2.3)";
+pin io u32 cfg.control.observer-mode "0 Legacy, 1 Shadow, 2 Active, 3 Auto";
 pin io u32 cfg.control.target-mode "0 Off, 1 Shadow, 2 Active";
 pin io u32 cfg.control.slowdown-mode "0 Off, 1 Shadow, 2 Active";
 pin io float cfg.control.feedforward-cap "Maximum fraction of w-hat applied in Observer Active";
@@ -113,8 +117,7 @@ pin io u32 cfg.control.conf-evidence-ms;
 pin io float cfg.control.vad-down-min;
 pin io float cfg.control.vad-lock;
 pin io float cfg.control.vad-unlock;
-/* Point-9 model dV = C (x - 1), C = C_ref (F_ref / F)^e: profile version 5
- * (firmware 2.4). Older firmware keeps its bytes; these read 0 there. */
+/* Point-9 model dV = C (x - 1), C = C_ref (F_ref / F)^e. */
 pin io float cfg.control.target-c-ref "Point-9 C at the reference feed, volts";
 pin io float cfg.control.target-max-offset "Maximum point-9 voltage offset";
 pin io u32 cfg.control.target-feed-ref "Point-9 reference feed F_ref, mm/min";
@@ -129,7 +132,7 @@ pin io float cfg.control.slowdown-min-conf;
 pin io u32 cfg.control.slowdown-delay-ms;
 pin io u32 cfg.control.slowdown-min-on-ms;
 pin io u32 cfg.control.slowdown-timeout-ms;
-/* Auto law, profile version 4 (firmware 2.3). */
+/* Auto law (observer mode 3). */
 pin io u32 cfg.control.loop-delay-ms "Auto: voltage-to-Z loop delay used to derive every gain";
 pin io float cfg.control.brake-accel-fraction "Auto: fraction of Z acceleration the recovery curve brakes with";
 pin io u32 cfg.control.auto-flags "Auto: 1 kerf hold, 2 use the measured loop delay";
@@ -147,7 +150,7 @@ pin out u32 fb.profile.read-sequence "Increments after a complete CRC-checked pr
 
 /* ---- THC tuning parameters (input from INI or GUI) ---- */
 pin in float cfg.thc.deadband "Deadband in volts";
-pin in s32 cfg.thc.response-trim "Auto law response: -1 Smoother, 0 Auto, 1 Tighter (firmware 2.3)";
+pin in s32 cfg.thc.response-trim "Auto law response: -1 Smoother, 0 Auto, 1 Tighter";
 pin io float cfg.thc.delay "Delay in seconds (writable so gcode-cmd S5xx can update it)";
 pin io u32 cfg.thc.set-point "Set point in volts (writable so gcode-cmd S3xx can update it)";
 pin in u32 cfg.thc.upper-limit "Upper fault limit in volts";
@@ -205,6 +208,8 @@ pin out float data.current-precise "Measured arc current with Q4 precision";
 pin out u32 data.target-volts "Active target voltage";
 pin out s32 data.step-delta "Accumulated motor step delta from firmware";
 pin out u32 fw.app-rev "DTHC6 application firmware revision (FW_REV)";
+pin out u32 fw.required-rev "Firmware revision this driver speaks (FW_REV)";
+pin out bit fw.version-ok "The board runs the required firmware; otherwise the THC is held off";
 
 /* ---- Status word and decoded bits ---- */
 pin out u32 status.code "Raw 32-bit firmware status word";
@@ -239,6 +244,8 @@ pin out bit status.target-active;
 pin out bit status.slowdown-active;
 pin out bit status.profile-fault;
 pin out bit status.down-lock;
+pin out u32 status.vad-mode "Speed-hold mode the firmware applies (trace)";
+pin out bit status.vad-hold "Firmware holds Z for XY speed now";
 
 /* ---- Observer trace and adaptive-feed recommendation ---- */
 pin out u32 trace.tick;
@@ -259,9 +266,30 @@ pin out float trace.confidence;
 pin out float trace.load;
 pin out float trace.rxy;
 pin out bit trace.kerf-hold "Auto: downward motion held for a kerf or edge";
-pin out bit trace.target-cutoff "Point 9 would hold the THC now (firmware 2.4; reported only)";
+pin out bit trace.target-cutoff "Point 9 policy holds the THC now (the real hold with firmware VAD)";
+pin out bit trace.target-uncalibrated "Point 9: the process's C is not calibrated yet";
+pin out bit trace.model-cutoff "Point 9: the model's own cutoff would hold";
+pin out bit trace.hold-vad "Firmware hold: XY below VAD percent";
+pin out bit trace.hold-model "Firmware hold: below the point-9 model's cutoff (Auto VAD)";
+pin out bit trace.hold-stale "Firmware hold: XY speed stale or invalid";
+pin out bit trace.model-target "Auto VAD runs on the model with its offset applied";
+pin out float trace.learn-c "Point-9 C the model uses now, volts";
+pin out u32 trace.learn-count "Learned slowdowns of the C in use (0 = feed law)";
+pin out u32 trace.learn-status "Raw learner status: bits 0-3 flags, last result << 8";
+pin out bit trace.learn-learned "The model uses a learned C";
+pin out bit trace.learn-calibrated "The C in use is calibrated (two or more slowdowns)";
+pin out bit trace.learn-scaled "The C in use is borrowed from a nearby feed";
+pin out bit trace.learn-store-due "Learned table not yet saved to flash";
+pin out u32 trace.learn-last-result "Last slowdown: 1 accepted, 2 short, 3 kerf, 4 Z, 5 timeout, 6 noise, 7 residual, 8 uncertain, 9 range, 10 interrupted, 11 held, 12 reset";
+pin out float trace.learn-last-c "Last slowdown's fitted C, volts";
+pin out u32 trace.learn-accepts "Slowdowns learned since power-up";
+pin out u32 trace.learn-rejects "Slowdowns rejected since power-up";
+pin out u32 trace.learn-solve-us "Longest learner solve step, us";
+pin out u32 trace.learn-stores "Learned-table flash records written";
+pin out bit trace.learn-store-failed "A learned-table flash write failed";
+pin out u32 trace.learn-z-skips "Slowdowns skipped because Z moved";
 pin out float trace.slope "Learned surface slope (rise/run) at actual XY speed";
-/* Trace v3 diagnostic slot, refreshed in turn (firmware 2.3). */
+/* Trace diagnostic slot, refreshed in turn. */
 pin out u32 trace.compute-max-us "Worst 1 ms observer step time, us, including interrupts";
 pin out u32 trace.late-discards "Observer results discarded as late";
 pin out u32 trace.late-overwrites "Observer samples overwritten before they started";
@@ -272,8 +300,8 @@ pin out float trace.noise-mm "Measured gap noise, one sigma";
 pin out float trace.delay-estimate "Measured realized-Z-to-voltage delay, ms";
 pin out float trace.arc-gain "Measured arc V/mm relative to 1/0.127 (1.0 = as assumed)";
 pin out u32 trace.ident-fits "Delay/arc-gain identification windows accepted";
-/* Firmware 2.3 diagnostic build: link and fault diagnostics.  Counts are
- * since board power-up; they reset only with power. */
+/* Link and fault diagnostics.  Counts are since board power-up; they reset
+ * only with power. */
 pin out u32 trace.spi-repairs "Replies resynchronised at a frame end (transmit side out of step)";
 pin out u32 trace.spi-tx-underflows "Frames whose reply ran dry (board SPI handler late)";
 pin out u32 trace.spi-rx-overflows "Frames that lost a received byte (board SPI handler late)";
@@ -329,6 +357,8 @@ pin out bit thc.prog-stop-out "Assert to stop program on fault; connect to halui
 /* ---- Velocity anti-dive / auto-delay inputs ---- */
 pin in bit thc.vad-enabled "Velocity anti-dive enabled";
 pin in s32 thc.vad-percent "VAD percentage (from thcenable.percent)";
+pin in u32 thc.vad-mode "Speed hold: 0 host thcenable, 1 firmware VAD, 2 Auto VAD";
+pin out bit thc.host-vad-enable "thcenable speed gate: thc.vad-enabled unless the firmware holds for speed; connect to thcenable.enable";
 pin in float thc.xy-accel "XY axis acceleration in units/sec^2 (used for auto-delay calc)";
 pin in bit thc.autodelay "When true, use auto-calculated THC delay instead of cfg.thc.delay";
 
@@ -359,7 +389,6 @@ pin out u32 update.state "Firmware update state: 0 RUN, 1 QUIESCING, 2 BRIDGE_RE
 pin out s32 update.error-code "Firmware update bridge error: 0 none, 1 FIFO clear, 2 shmem, 3 overrun, 4 transfer, 5 aborted";
 
 param rw u32 comm.online-timeout-cycles = 100 "Servo cycles to keep comm.online after last good frame";
-param rw bit logging.feed-includes-adaptive = 0 "logging.xy-velocity-commanded is the programmed feed (motion.feed-*-per-second), which already includes motion.adaptive-feed";
 
 option extra_setup yes;
 option extra_cleanup yes;
@@ -387,8 +416,9 @@ variable unsigned profile_wait_cycles;
 variable unsigned profile_request_started;
 variable unsigned trace_cycle;
 variable unsigned trace_age_cycles;
+variable unsigned reported_fw_rev;
 variable uint32_t host_sample_sequence;
-variable uint8_t profile_bytes[81];
+variable uint8_t profile_bytes[79];
 
 /* ---- Online countdown ---- */
 variable unsigned online_countdown;
@@ -527,18 +557,12 @@ enum {
 #define DTHC_VOLTAGE_STREAM_DEPTH   50000
 /* 21 HAL stream slots: two ticks, packed sample flags, 17 floats, packed trace flags. */
 #define DTHC_VOLTAGE_STREAM_TYPES   "uuufffffffffffffffffu"
-#define DTHC_VOLTAGE_HISTORY_FW_REV 21u
-#define DTHC_OBSERVER_FW_REV        20u
-/* Firmware 2.2 removed the fixed 0.127 mm/V scale from the profile. */
-#define DTHC_PROFILE_FW_REV         22u
-#define DTHC_PROFILE_V3_BYTES       72u
-/* Firmware 2.3: Auto law, profile version 4, response trim, trace v3. */
-#define DTHC_AUTO_FW_REV            23u
-#define DTHC_PROFILE_V4_BYTES       81u
-/* Firmware 2.4: profile version 5, still 81 bytes. The point-9 kerf-front
- * model reuses bytes 51-53, 56-59 and 65, which held the linear model. */
-#define DTHC_TARGET_MODEL_FW_REV    24u
-#define DTHC_PROFILE_BYTES          dthc_profile_length(__comp_inst)
+/* The one firmware revision this driver speaks; the profile is version 6,
+ * 79 bytes, in three pages. */
+#define DTHC_FW_REV                 27u
+#define DTHC_PROFILE_BYTES          79u
+#define DTHC_VAD_MODE_HOST          0u
+#define DTHC_VAD_MODE_AUTO          2u
 #define DTHC_PROFILE_PAGE_BYTES     28u
 #define DTHC_PROFILE_PAGE_COUNT     3u
 
@@ -825,8 +849,7 @@ static void dthc_apply_status(struct __comp_state *__comp_inst, uint32_t status)
  * ================================================================ */
 
 static void dthc_stream_voltage_sample(struct __comp_state *__comp_inst,
-                                       uint32_t sample_tick,
-                                       uint16_t packed, unsigned v3)
+                                       uint32_t sample_tick, uint16_t packed)
 {
     union hal_stream_data sample[21];
     if (!logging_enable || !logging_compatible || !dthc_voltage_stream_ready)
@@ -837,10 +860,10 @@ static void dthc_stream_voltage_sample(struct __comp_state *__comp_inst,
     /* Bits 0..2: torch, ArcOK, sampled THC enable. */
     sample[2].u = ((packed >> 15) & 1u) |
                   (((packed >> 14) & 1u) << 1) |
-                  ((v3 ? ((packed >> 13) & 1u) : 0u) << 2);
+                  (((packed >> 13) & 1u) << 2);
     sample[3].f = logging_xy_velocity_commanded;
     sample[4].f = logging_xy_velocity_realtime;
-    sample[5].f = (double)(packed & (v3 ? 0x1FFFu : 0x3FFFu)) / 16.0;
+    sample[5].f = (double)(packed & 0x1FFFu) / 16.0;
     sample[6].f = trace_base_target;
     sample[7].f = trace_adjusted_target;
     sample[8].f = trace_target_candidate;
@@ -868,11 +891,8 @@ static void dthc_stream_voltage_sample(struct __comp_state *__comp_inst,
  *   [4..7]   status_code  (u32)
  *   [8..11]  step_delta   (s32)
  *   [12..13] target_volts (u16, Q4)
- *   Legacy: [14] count, [15..] packed samples.
- *   V2: [14] 0x82, [15..18] first 100-us tick, [19] count,
- *       [20..] packed samples.
- *   V3: [14] 0x83, [15..18] first tick, [19] count (at most 12),
- *       [20..] packed samples with THC enable in bit 13.
+ *   [14]     0 without history, or 0x83 followed by [15..18] the first
+ *            100-us tick, [19] count (at most 12) and [20..] packed samples.
  */
 static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
                                   const uint8_t *payload, uint8_t payload_len)
@@ -906,28 +926,11 @@ static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
         }
         for (i = 0; i < count; i++)
             dthc_stream_voltage_sample(__comp_inst, first_tick + (uint32_t)i,
-                dthc_get_u16(payload + 20 + (i * 2)), 1u);
-    } else if ((payload_len >= 20) && (payload[14] == 0x82u)) {
-        uint32_t first_tick = dthc_get_u32(payload + 15);
-        count = payload[19];
-        if (count > 12) count = 12;
-        if ((int)(payload_len - 20) < count * 2)
-            count = (payload_len - 20) / 2;
-        for (i = 0; i < count; i++)
-            dthc_stream_voltage_sample(__comp_inst, first_tick + (uint32_t)i,
-                dthc_get_u16(payload + 20 + (i * 2)), 0u);
-    } else if (payload_len >= 15) {
-        count = payload[14];
-        if (count > 14) count = 14;
-        if ((int)(payload_len - 15) < count * 2)
-            count = (payload_len - 15) / 2;
-        for (i = 0; i < count; i++)
-            dthc_stream_voltage_sample(__comp_inst, 0u,
-                dthc_get_u16(payload + 15 + (i * 2)), 0u);
+                dthc_get_u16(payload + 20 + (i * 2)));
     }
 }
 
-/* CMD_CONFIG reply payload layout (42 bytes when DTHC6 FW_REV is present):
+/* CMD_CONFIG reply payload layout (43 bytes):
  *   [0]      deadband          (u8)
  *   [1..2]   delay             (u16, ms)
  *   [3..4]   set_point         (u16, Q4)
@@ -945,16 +948,34 @@ static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
  *   [32]     step_polarity     (u8)
  *   [33]     unit_type         (u8)
  *   [34..37] max_down_velocity (u32)
- *   [38..41] FW_REV            (u32, optional on older firmware)
+ *   [38..41] FW_REV            (u32)
+ *   [42]     response trim     (s8)
  */
 static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
                                     const uint8_t *payload, uint8_t payload_len)
 {
-    if (payload_len < 38) {
+    if (payload_len < 43) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
     }
+
+    /* The revision first: nothing else is trusted from another one. */
+    fw_app_rev = dthc_get_u32(payload + 38);
+    if (fw_app_rev != reported_fw_rev) {
+        reported_fw_rev = fw_app_rev;
+        if (fw_app_rev != DTHC_FW_REV)
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "ccc_dthc_bspi: DTHC6 firmware %u.%u, this driver needs "
+                "%u.%u; the THC stays off until the firmware is updated\n",
+                (unsigned)(fw_app_rev / 10u), (unsigned)(fw_app_rev % 10u),
+                DTHC_FW_REV / 10u, DTHC_FW_REV % 10u);
+    }
+    fw_version_ok = (fw_app_rev == DTHC_FW_REV) ? 1 : 0;
+    fw_required_rev = DTHC_FW_REV;
+    comm_config_valid = 1;
+    if (!fw_version_ok)
+        return;
 
     fb_thc_deadband      = (double)payload[0]                / 16.0;
     fb_thc_delay         = (double)dthc_get_u16(payload + 1) / 1000.0;
@@ -979,11 +1000,8 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     fb_motor_step_polarity    = payload[32] ? 1 : 0;
     fb_motor_metric_units     = payload[33] ? 1 : 0;
     fb_motor_max_down_velocity= dthc_get_u32(payload + 34);
-    if (payload_len >= 42)
-        fw_app_rev = dthc_get_u32(payload + 38);
-    if (payload_len >= 43)
-        fb_thc_response_trim = (int8_t)payload[42];
-    if ((fw_app_rev >= DTHC_PROFILE_FW_REV) && !profile_request_started) {
+    fb_thc_response_trim = (int8_t)payload[42];
+    if (!profile_request_started) {
         profile_action = DTHC_PROFILE_READ;
         profile_page = 0u;
         profile_waiting = 0u;
@@ -1004,8 +1022,6 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
         (fb_motor_metric_units      != (cfg_motor_metric_units ? 1 : 0))) {
         pending_motor_config_write = 1;
     }
-
-    comm_config_valid = 1;
 }
 
 static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
@@ -1028,74 +1044,64 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
     cfg_autoset_lower_tol = fb_autoset_lower_tol;
 }
 
-/* Firmware 2.3 appends the Auto fields (profile version 4). */
-static uint32_t dthc_profile_length(struct __comp_state *__comp_inst)
-{
-    return (fw_app_rev >= DTHC_AUTO_FW_REV) ? DTHC_PROFILE_V4_BYTES :
-                                              DTHC_PROFILE_V3_BYTES;
-}
-
+/* Profile version 6, 79 bytes, big-endian (thc_profile_serialize()):
+ *   [0..3] generation, [4..6] observer/target/slowdown mode,
+ *   [7] feedforward cap, [8..11] deadzone min/max (Q4), [12..15] kquiet
+ *   (Q16), [16..31] e spans (nm), [32..35] alpha/beta (Q16), [36..39]
+ *   residual clip (nm), [40..41] decay (Q16), [42..45] confidence rise,
+ *   fall, min apply, evidence ticks, [46..48] VAD down min, lock, unlock,
+ *   [49] target feed exponent (centi), [50..51] C_ref (mV), [52..53] max
+ *   offset (Q4), [54..55] F_ref (mm/min), [56..57] lead (um), [58..62]
+ *   slowdown min scale, Z margin, attack, release, min confidence, [63]
+ *   target cutoff, [64..69] slowdown delay, min on, timeout (ms), [70..72]
+ *   loop delay, brake share, Auto flags, [73..74] kerf threshold (Q4),
+ *   [75..76] kerf hold max (ms), [77..78] transition error (um). */
 static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 {
-    cfg_control_qualification_flags = dthc_get_u16(profile_bytes + 4);
-    cfg_control_observer_mode = profile_bytes[6];
-    cfg_control_target_mode = profile_bytes[7];
-    cfg_control_slowdown_mode = profile_bytes[8];
-    cfg_control_feedforward_cap = (double)profile_bytes[9] / 255.0;
-    cfg_control_deadzone_min = (double)dthc_get_u16(profile_bytes + 10) / 16.0;
-    cfg_control_deadzone_max = (double)dthc_get_u16(profile_bytes + 12) / 16.0;
-    cfg_control_kquiet_per_s = (double)dthc_get_u32(profile_bytes + 14) / 65536.0;
-    cfg_control_e_nominal_up_mm = (double)dthc_get_u32(profile_bytes + 18) / 1000000.0;
-    cfg_control_e_high_up_mm = (double)dthc_get_u32(profile_bytes + 22) / 1000000.0;
-    cfg_control_e_nominal_down_mm = (double)dthc_get_u32(profile_bytes + 26) / 1000000.0;
-    cfg_control_e_high_down_mm = (double)dthc_get_u32(profile_bytes + 30) / 1000000.0;
-    cfg_control_observer_alpha = (double)dthc_get_u16(profile_bytes + 34) / 65536.0;
-    cfg_control_observer_beta = (double)dthc_get_u16(profile_bytes + 36) / 65536.0;
-    cfg_control_residual_clip_mm = (double)dthc_get_u32(profile_bytes + 38) / 1000000.0;
-    cfg_control_observer_decay = (double)dthc_get_u16(profile_bytes + 42) / 65536.0;
-    cfg_control_confidence_rise = profile_bytes[44];
-    cfg_control_confidence_fall = profile_bytes[45];
-    cfg_control_confidence_min_apply = (double)profile_bytes[46] / 255.0;
-    cfg_control_conf_evidence_ms = profile_bytes[47];
-    cfg_control_vad_down_min = (double)profile_bytes[48] / 255.0;
-    cfg_control_vad_lock = (double)profile_bytes[49] / 255.0;
-    cfg_control_vad_unlock = (double)profile_bytes[50] / 255.0;
+    cfg_control_observer_mode = profile_bytes[4];
+    cfg_control_target_mode = profile_bytes[5];
+    cfg_control_slowdown_mode = profile_bytes[6];
+    cfg_control_feedforward_cap = (double)profile_bytes[7] / 255.0;
+    cfg_control_deadzone_min = (double)dthc_get_u16(profile_bytes + 8) / 16.0;
+    cfg_control_deadzone_max = (double)dthc_get_u16(profile_bytes + 10) / 16.0;
+    cfg_control_kquiet_per_s = (double)dthc_get_u32(profile_bytes + 12) / 65536.0;
+    cfg_control_e_nominal_up_mm = (double)dthc_get_u32(profile_bytes + 16) / 1000000.0;
+    cfg_control_e_high_up_mm = (double)dthc_get_u32(profile_bytes + 20) / 1000000.0;
+    cfg_control_e_nominal_down_mm = (double)dthc_get_u32(profile_bytes + 24) / 1000000.0;
+    cfg_control_e_high_down_mm = (double)dthc_get_u32(profile_bytes + 28) / 1000000.0;
+    cfg_control_observer_alpha = (double)dthc_get_u16(profile_bytes + 32) / 65536.0;
+    cfg_control_observer_beta = (double)dthc_get_u16(profile_bytes + 34) / 65536.0;
+    cfg_control_residual_clip_mm = (double)dthc_get_u32(profile_bytes + 36) / 1000000.0;
+    cfg_control_observer_decay = (double)dthc_get_u16(profile_bytes + 40) / 65536.0;
+    cfg_control_confidence_rise = profile_bytes[42];
+    cfg_control_confidence_fall = profile_bytes[43];
+    cfg_control_confidence_min_apply = (double)profile_bytes[44] / 255.0;
+    cfg_control_conf_evidence_ms = profile_bytes[45];
+    cfg_control_vad_down_min = (double)profile_bytes[46] / 255.0;
+    cfg_control_vad_lock = (double)profile_bytes[47] / 255.0;
+    cfg_control_vad_unlock = (double)profile_bytes[48] / 255.0;
+    cfg_control_target_feed_exponent = (double)profile_bytes[49] / 100.0;
+    cfg_control_target_c_ref = (double)dthc_get_u16(profile_bytes + 50) / 1000.0;
     cfg_control_target_max_offset =
-        (double)dthc_get_u16(profile_bytes + 54) / 16.0;
-    if (fw_app_rev >= DTHC_TARGET_MODEL_FW_REV) {
-        cfg_control_target_feed_exponent = (double)profile_bytes[51] / 100.0;
-        cfg_control_target_c_ref =
-            (double)dthc_get_u16(profile_bytes + 52) / 1000.0;
-        cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 56);
-        cfg_control_target_lead_mm =
-            (double)dthc_get_u16(profile_bytes + 58) / 1000.0;
-        cfg_control_target_cutoff = (double)profile_bytes[65] / 255.0;
-    } else {
-        /* The linear model's bytes are not shown; a write keeps them. */
-        cfg_control_target_feed_exponent = 0.0;
-        cfg_control_target_c_ref = 0.0;
-        cfg_control_target_feed_ref = 0u;
-        cfg_control_target_lead_mm = 0.0;
-        cfg_control_target_cutoff = 0.0;
-    }
-    cfg_control_slowdown_min_scale = (double)profile_bytes[60] / 255.0;
-    cfg_control_slowdown_z_margin = (double)profile_bytes[61] / 255.0;
-    cfg_control_slowdown_attack = (double)profile_bytes[62] / 255.0;
-    cfg_control_slowdown_release = (double)profile_bytes[63] / 255.0;
-    cfg_control_slowdown_min_conf = (double)profile_bytes[64] / 255.0;
-    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 66);
-    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 68);
-    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 70);
-    if (DTHC_PROFILE_BYTES >= DTHC_PROFILE_V4_BYTES) {
-        cfg_control_loop_delay_ms = profile_bytes[72];
-        cfg_control_brake_accel_fraction = (double)profile_bytes[73] / 256.0;
-        cfg_control_auto_flags = profile_bytes[74];
-        cfg_control_kerf_threshold =
-            (double)dthc_get_u16(profile_bytes + 75) / 16.0;
-        cfg_control_kerf_hold_max_ms = dthc_get_u16(profile_bytes + 77);
-        cfg_control_transition_error_mm =
-            (double)dthc_get_u16(profile_bytes + 79) / 1000.0;
-    }
+        (double)dthc_get_u16(profile_bytes + 52) / 16.0;
+    cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 54);
+    cfg_control_target_lead_mm = (double)dthc_get_u16(profile_bytes + 56) / 1000.0;
+    cfg_control_slowdown_min_scale = (double)profile_bytes[58] / 255.0;
+    cfg_control_slowdown_z_margin = (double)profile_bytes[59] / 255.0;
+    cfg_control_slowdown_attack = (double)profile_bytes[60] / 255.0;
+    cfg_control_slowdown_release = (double)profile_bytes[61] / 255.0;
+    cfg_control_slowdown_min_conf = (double)profile_bytes[62] / 255.0;
+    cfg_control_target_cutoff = (double)profile_bytes[63] / 255.0;
+    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 64);
+    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 66);
+    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 68);
+    cfg_control_loop_delay_ms = profile_bytes[70];
+    cfg_control_brake_accel_fraction = (double)profile_bytes[71] / 256.0;
+    cfg_control_auto_flags = profile_bytes[72];
+    cfg_control_kerf_threshold = (double)dthc_get_u16(profile_bytes + 73) / 16.0;
+    cfg_control_kerf_hold_max_ms = dthc_get_u16(profile_bytes + 75);
+    cfg_control_transition_error_mm =
+        (double)dthc_get_u16(profile_bytes + 77) / 1000.0;
     fb_profile_generation = dthc_get_u32(profile_bytes + 0);
     fb_profile_length = DTHC_PROFILE_BYTES;
     fb_profile_valid = 1;
@@ -1105,81 +1111,74 @@ static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
 {
     unsigned mode;
-    dthc_put_u16(profile_bytes + 4,
-        (uint16_t)(cfg_control_qualification_flags & 0xffffu));
+    double brake;
     mode = cfg_control_observer_mode;
-    if (mode > ((fw_app_rev >= DTHC_AUTO_FW_REV) ? 3u : 2u))
-        mode = 0u;
-    profile_bytes[6] = (uint8_t)mode;
+    profile_bytes[4] = (mode > 3u) ? 0u : (uint8_t)mode;
     mode = cfg_control_target_mode;
-    profile_bytes[7] = (mode > 2u) ? 1u : (uint8_t)mode;
+    profile_bytes[5] = (mode > 2u) ? 1u : (uint8_t)mode;
     mode = cfg_control_slowdown_mode;
-    profile_bytes[8] = (mode > 2u) ? 1u : (uint8_t)mode;
-    profile_bytes[9] = dthc_encode_fraction_q8(cfg_control_feedforward_cap);
-    dthc_put_u16(profile_bytes + 10, dthc_encode_q4(cfg_control_deadzone_min));
-    dthc_put_u16(profile_bytes + 12, dthc_encode_q4(cfg_control_deadzone_max));
-    dthc_put_u32(profile_bytes + 14,
+    profile_bytes[6] = (mode > 2u) ? 1u : (uint8_t)mode;
+    profile_bytes[7] = dthc_encode_fraction_q8(cfg_control_feedforward_cap);
+    dthc_put_u16(profile_bytes + 8, dthc_encode_q4(cfg_control_deadzone_min));
+    dthc_put_u16(profile_bytes + 10, dthc_encode_q4(cfg_control_deadzone_max));
+    dthc_put_u32(profile_bytes + 12,
         dthc_encode_uq16(cfg_control_kquiet_per_s));
-    dthc_put_u32(profile_bytes + 18,
+    dthc_put_u32(profile_bytes + 16,
         dthc_encode_u32(cfg_control_e_nominal_up_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 22,
+    dthc_put_u32(profile_bytes + 20,
         dthc_encode_u32(cfg_control_e_high_up_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 26,
+    dthc_put_u32(profile_bytes + 24,
         dthc_encode_u32(cfg_control_e_nominal_down_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 30,
+    dthc_put_u32(profile_bytes + 28,
         dthc_encode_u32(cfg_control_e_high_down_mm * 1000000.0));
-    dthc_put_u16(profile_bytes + 34,
+    dthc_put_u16(profile_bytes + 32,
         dthc_encode_u16(cfg_control_observer_alpha * 65536.0));
-    dthc_put_u16(profile_bytes + 36,
+    dthc_put_u16(profile_bytes + 34,
         dthc_encode_u16(cfg_control_observer_beta * 65536.0));
-    dthc_put_u32(profile_bytes + 38,
+    dthc_put_u32(profile_bytes + 36,
         dthc_encode_u32(cfg_control_residual_clip_mm * 1000000.0));
-    dthc_put_u16(profile_bytes + 42,
+    dthc_put_u16(profile_bytes + 40,
         dthc_encode_u16(cfg_control_observer_decay * 65536.0));
-    profile_bytes[44] = dthc_clamp_u8(cfg_control_confidence_rise);
-    profile_bytes[45] = dthc_clamp_u8(cfg_control_confidence_fall);
-    profile_bytes[46] = dthc_encode_fraction_q8(cfg_control_confidence_min_apply);
-    profile_bytes[47] = dthc_clamp_u8(cfg_control_conf_evidence_ms);
-    profile_bytes[48] = dthc_encode_fraction_q8(cfg_control_vad_down_min);
-    profile_bytes[49] = dthc_encode_fraction_q8(cfg_control_vad_lock);
-    profile_bytes[50] = dthc_encode_fraction_q8(cfg_control_vad_unlock);
-    dthc_put_u16(profile_bytes + 54,
+    profile_bytes[42] = dthc_clamp_u8(cfg_control_confidence_rise);
+    profile_bytes[43] = dthc_clamp_u8(cfg_control_confidence_fall);
+    profile_bytes[44] = dthc_encode_fraction_q8(cfg_control_confidence_min_apply);
+    profile_bytes[45] = dthc_clamp_u8(cfg_control_conf_evidence_ms);
+    profile_bytes[46] = dthc_encode_fraction_q8(cfg_control_vad_down_min);
+    profile_bytes[47] = dthc_encode_fraction_q8(cfg_control_vad_lock);
+    profile_bytes[48] = dthc_encode_fraction_q8(cfg_control_vad_unlock);
+    profile_bytes[49] = dthc_clamp_u8(
+        dthc_encode_u16(cfg_control_target_feed_exponent * 100.0));
+    dthc_put_u16(profile_bytes + 50,
+        dthc_encode_u16(cfg_control_target_c_ref * 1000.0));
+    dthc_put_u16(profile_bytes + 52,
         dthc_encode_q4(cfg_control_target_max_offset));
-    if (fw_app_rev >= DTHC_TARGET_MODEL_FW_REV) {
-        profile_bytes[51] = dthc_clamp_u8(
-            dthc_encode_u16(cfg_control_target_feed_exponent * 100.0));
-        dthc_put_u16(profile_bytes + 52,
-            dthc_encode_u16(cfg_control_target_c_ref * 1000.0));
-        dthc_put_u16(profile_bytes + 56,
-            dthc_encode_u16(cfg_control_target_feed_ref));
-        dthc_put_u16(profile_bytes + 58,
-            dthc_encode_u16(cfg_control_target_lead_mm * 1000.0));
-        profile_bytes[65] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
-    }
-    profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_min_scale);
-    profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
-    profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
-    profile_bytes[63] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
-    profile_bytes[64] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
-    dthc_put_u16(profile_bytes + 66,
+    dthc_put_u16(profile_bytes + 54,
+        dthc_encode_u16(cfg_control_target_feed_ref));
+    dthc_put_u16(profile_bytes + 56,
+        dthc_encode_u16(cfg_control_target_lead_mm * 1000.0));
+    profile_bytes[58] = dthc_encode_fraction_q8(cfg_control_slowdown_min_scale);
+    profile_bytes[59] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
+    profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
+    profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
+    profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
+    profile_bytes[63] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
+    dthc_put_u16(profile_bytes + 64,
         dthc_encode_u16(cfg_control_slowdown_delay_ms));
-    dthc_put_u16(profile_bytes + 68,
+    dthc_put_u16(profile_bytes + 66,
         dthc_encode_u16(cfg_control_slowdown_min_on_ms));
-    dthc_put_u16(profile_bytes + 70,
+    dthc_put_u16(profile_bytes + 68,
         dthc_encode_u16(cfg_control_slowdown_timeout_ms));
-    if (DTHC_PROFILE_BYTES >= DTHC_PROFILE_V4_BYTES) {
-        double brake = cfg_control_brake_accel_fraction * 256.0 + 0.5;
-        profile_bytes[72] = dthc_clamp_u8(cfg_control_loop_delay_ms);
-        profile_bytes[73] = (brake < 1.0) ? 1u :
-                            (brake > 255.0) ? 255u : (uint8_t)brake;
-        profile_bytes[74] = dthc_clamp_u8(cfg_control_auto_flags);
-        dthc_put_u16(profile_bytes + 75,
-            dthc_encode_q4(cfg_control_kerf_threshold));
-        dthc_put_u16(profile_bytes + 77,
-            dthc_encode_u16(cfg_control_kerf_hold_max_ms));
-        dthc_put_u16(profile_bytes + 79,
-            dthc_encode_u16(cfg_control_transition_error_mm * 1000.0));
-    }
+    brake = cfg_control_brake_accel_fraction * 256.0 + 0.5;
+    profile_bytes[70] = dthc_clamp_u8(cfg_control_loop_delay_ms);
+    profile_bytes[71] = (brake < 1.0) ? 1u :
+                        (brake > 255.0) ? 255u : (uint8_t)brake;
+    profile_bytes[72] = dthc_clamp_u8(cfg_control_auto_flags);
+    dthc_put_u16(profile_bytes + 73,
+        dthc_encode_q4(cfg_control_kerf_threshold));
+    dthc_put_u16(profile_bytes + 75,
+        dthc_encode_u16(cfg_control_kerf_hold_max_ms));
+    dthc_put_u16(profile_bytes + 77,
+        dthc_encode_u16(cfg_control_transition_error_mm * 1000.0));
 }
 
 static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
@@ -1258,8 +1257,7 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
                                    const uint8_t *payload,
                                    uint8_t payload_len)
 {
-    if ((payload_len < 41u) || (payload[0] < 2u) || (payload[0] > 3u) ||
-        ((payload[0] == 3u) && (payload_len < 44u))) {
+    if ((payload_len < 44u) || (payload[0] != 3u)) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
@@ -1283,6 +1281,14 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
     trace_realized_mm_s = (double)dthc_get_s24(payload + 38) / 1000.0;
     trace_kerf_hold = (trace_reason & 0x0100u) ? 1 : 0;
     trace_target_cutoff = (trace_reason & 0x0200u) ? 1 : 0;
+    trace_target_uncalibrated = (trace_reason & 0x0400u) ? 1 : 0;
+    trace_model_cutoff = (trace_reason & 0x0800u) ? 1 : 0;
+    trace_hold_vad = (trace_reason & 0x1000u) ? 1 : 0;
+    trace_hold_model = (trace_reason & 0x2000u) ? 1 : 0;
+    trace_hold_stale = (trace_reason & 0x4000u) ? 1 : 0;
+    trace_model_target = (trace_reason & 0x8000u) ? 1 : 0;
+    status_vad_mode = (trace_mode_flags >> 5) & 3u;
+    status_vad_hold = (trace_mode_flags & 0x80u) ? 1 : 0;
     {
         double xy_mm_s = logging_xy_velocity_realtime *
                          (cfg_motor_metric_units ? 1.0 : 25.4);
@@ -1321,6 +1327,26 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 27: trace_isr_max_spi_us = (double)value / 10.0; break;
         case 28: trace_isr_max_systick_us = (double)value / 10.0; break;
         case 29: trace_mask_max_us = (double)value / 10.0; break;
+        /* Point-9 C learner (firmware 2.4 and later). */
+        case 30: trace_learn_c = (double)value / 1000.0; break;
+        case 31: trace_learn_count = value; break;
+        case 32:
+            trace_learn_status = value;
+            trace_learn_learned = (value & 0x01u) ? 1 : 0;
+            trace_learn_calibrated = (value & 0x02u) ? 1 : 0;
+            trace_learn_store_due = (value & 0x04u) ? 1 : 0;
+            trace_learn_scaled = (value & 0x08u) ? 1 : 0;
+            trace_learn_last_result = value >> 8;
+            break;
+        case 33: trace_learn_last_c = (double)value / 1000.0; break;
+        case 34: trace_learn_accepts = value; break;
+        case 35: trace_learn_rejects = value; break;
+        case 36: trace_learn_solve_us = value; break;
+        case 37:
+            trace_learn_stores = value & 0x7fffu;
+            trace_learn_store_failed = (value & 0x8000u) ? 1 : 0;
+            break;
+        case 38: trace_learn_z_skips = value; break;
         default: break;
         }
     }
@@ -1333,9 +1359,32 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
  * Payload builders
  * ================================================================ */
 
-/* CMD_DATA request: legacy bytes remain first, followed by the revision-2
- * validity flags, commanded/actual scalar XY velocity in units/min Q16.16,
- * and a monotonically increasing host sample sequence.
+/* Speed-hold mode for the firmware: the operator's choice while VAD is on
+ * and a program runs (thcenable's own conditions), else the host's gate,
+ * which then passes the THC anyway. */
+static unsigned dthc_vad_mode_sent(struct __comp_state *__comp_inst)
+{
+    if (!thc_vad_enabled || thc_prog_is_idle)
+        return DTHC_VAD_MODE_HOST;
+    return (thc_vad_mode > DTHC_VAD_MODE_AUTO) ? DTHC_VAD_MODE_HOST :
+                                                 thc_vad_mode;
+}
+
+/* thcenable's speed gate stays on unless the firmware holds for speed: the
+ * required firmware online, a mode sent, and its fresh trace confirming
+ * that mode.  So the firmware takes over before the host lets go, and any
+ * doubt (link, trace, revision) puts the host gate back at once. */
+static void dthc_update_host_vad(struct __comp_state *__comp_inst)
+{
+    unsigned sent = dthc_vad_mode_sent(__comp_inst);
+    unsigned firmware_holds = comm_online && fw_version_ok && !update_enable &&
+        (update_state == DTHC_UPDATE_RUN) &&
+        (sent != DTHC_VAD_MODE_HOST) && (trace_age_cycles <= 50u) &&
+        (status_vad_mode == sent);
+    thc_host_vad_enable = (thc_vad_enabled && !firmware_holds) ? 1 : 0;
+}
+
+/* CMD_DATA request, 18 bytes (see the description above).
  *   bit 0 : motor_up
  *   bit 1 : thc_enable   (unused when use_enable_pin=1)
  *   bit 2 : reset_step_delta
@@ -1344,7 +1393,11 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
  *   bit 5 : do_autoset
  *   bit 6 : use_enable_pin
  *   bit 7 : motor_down
- *   byte 1: response scale, 0..255 (255 = established full response)
+ *   byte 1: response scale, 0..255 (255 = full response)
+ *   bytes 2-14: runtime flags, nominal and actual XY (units/min Q16.16),
+ *            host sequence
+ *   bytes 15-17: speed-hold mode, VAD percent, point 10's applied feed
+ *            scale Q8
  */
 static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
                                        uint8_t *payload)
@@ -1382,31 +1435,24 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
 
     payload[0] = flags;
 
-    /* Basic velocity-adaptive response: at full programmed XY velocity the
-     * established DTHC response is unchanged; during commanded slowdowns the
-     * firmware receives a proportionally softer response.  The existing
-     * thcenable path remains the hard VAD backstop.  Missing/invalid velocity
-     * nets fail to 255 so old generated configurations are unaffected. */
-    /* Point 10's own slowdown is not a corner.  "expected" is the speed
-     * LinuxCNC was asked for, including that slowdown; "nominal" is the feed
-     * without it, which the firmware's point 10 needs.  Newer configurations
-     * feed the programmed feed, which already includes adaptive feed; older
-     * ones feed motion.requested-vel x feed override, which does not. */
+    /* Velocity-adaptive response: actual over programmed XY speed (255 at
+     * full feed, or with VAD off or the program idle).  The programmed feed
+     * (motion.feed-*-per-second) already includes point 10's adaptive feed;
+     * the firmware's nominal feed has that scale divided back out, since a
+     * point-10 slowdown is a real slowdown to the arc but not a corner. */
     double point10_scale = ((control_feed_scale_applied > 0.0) &&
                             (control_feed_scale_applied < 1.0)) ?
                            control_feed_scale_applied : 1.0;
     if (point10_scale < 0.05)
         point10_scale = 0.05;
-    double nominal_feed = logging_xy_velocity_commanded;
-    if (logging_feed_includes_adaptive)
-        nominal_feed /= point10_scale;
-    double expected = nominal_feed * point10_scale;
+    double nominal_feed = logging_xy_velocity_commanded / point10_scale;
 
     payload[1] = 255u;
     if (thc_vad_enabled && !thc_prog_is_idle &&
         (logging_xy_velocity_commanded > 0.000001) &&
         (logging_xy_velocity_realtime >= 0.0)) {
-        double ratio = logging_xy_velocity_realtime / expected;
+        double ratio = logging_xy_velocity_realtime /
+                       logging_xy_velocity_commanded;
 
         if (ratio <= 0.0)
             payload[1] = 0u;
@@ -1417,22 +1463,22 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
     pending_reset_step_delta = 0;
     pending_do_autoset = 0;
 
-    if (fw_app_rev >= DTHC_OBSERVER_FW_REV) {
-        uint8_t runtime_flags = 0u;
-        if ((logging_xy_velocity_commanded >= 0.0) &&
-            (logging_xy_velocity_realtime >= 0.0))
-            runtime_flags |= 0x01u;
-        if (logging_enable && fw_app_rev >= DTHC_VOLTAGE_HISTORY_FW_REV)
-            runtime_flags |= 0x0Eu; /* tick-anchored history with sampled THC enable */
-        payload[2] = runtime_flags;
-        dthc_put_u32(payload + 3,
-            dthc_encode_uq16(nominal_feed * 60.0));
-        dthc_put_u32(payload + 7,
-            dthc_encode_uq16(logging_xy_velocity_realtime * 60.0));
-        dthc_put_u32(payload + 11, ++host_sample_sequence);
-        return 15;
-    }
-    return 2;
+    uint8_t runtime_flags = 0u;
+    if ((logging_xy_velocity_commanded >= 0.0) &&
+        (logging_xy_velocity_realtime >= 0.0))
+        runtime_flags |= 0x01u;
+    if (logging_enable)
+        runtime_flags |= 0x0Eu; /* tick-anchored history with sampled THC enable */
+    payload[2] = runtime_flags;
+    dthc_put_u32(payload + 3, dthc_encode_uq16(nominal_feed * 60.0));
+    dthc_put_u32(payload + 7,
+        dthc_encode_uq16(logging_xy_velocity_realtime * 60.0));
+    dthc_put_u32(payload + 11, ++host_sample_sequence);
+    payload[15] = (uint8_t)dthc_vad_mode_sent(__comp_inst);
+    payload[16] = (uint8_t)((thc_vad_percent < 0) ? 0 :
+                            (thc_vad_percent > 100) ? 100 : thc_vad_percent);
+    payload[17] = (uint8_t)(point10_scale * 255.0 + 0.5);
+    return 18;
 }
 
 static uint8_t dthc_build_profile_payload(struct __comp_state *__comp_inst,
@@ -1472,7 +1518,7 @@ static uint8_t dthc_build_profile_payload(struct __comp_state *__comp_inst,
  *   [14..15] Pgain       (s16)
  *   [16..17] Igain       (s16)
  *   [18..19] Dgain       (s16)
- *   [20]     Auto response trim (s8: -1, 0, 1), firmware 2.3 and later
+ *   [20]     Auto response trim (s8: -1, 0, 1)
  */
 static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
                                              uint8_t *payload)
@@ -1491,12 +1537,11 @@ static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
     dthc_put_u16(payload + 14, dthc_encode_u16((double)cfg_thc_pgain));
     dthc_put_u16(payload + 16, dthc_encode_u16((double)cfg_thc_igain));
     dthc_put_u16(payload + 18, dthc_encode_u16((double)cfg_thc_dgain));
-    if (fw_app_rev >= DTHC_AUTO_FW_REV) {
+    {
         int trim = cfg_thc_response_trim;
         payload[20] = (uint8_t)(int8_t)((trim < -1) ? -1 : (trim > 1) ? 1 : trim);
-        return 21;
     }
-    return 20;
+    return 21;
 }
 
 /* CMD_CONF_SET mode 1 (motor parameters), 20 bytes:
@@ -2064,10 +2109,9 @@ static void dthc_check_autosettings(struct __comp_state *__comp_inst)
         prev_aset_lower_tol = cfg_autoset_lower_tol;
         pending_autosettings_write = 1;
     }
-    /* The response trim travels with the THC config (firmware 2.3); send
-     * it whenever the panel changes it, once the firmware revision is
-     * known. */
-    if (comm_config_valid && (fw_app_rev >= DTHC_AUTO_FW_REV) &&
+    /* The response trim travels with the THC config; send it whenever the
+     * panel changes it, once the firmware is known to be the right one. */
+    if (comm_config_valid && fw_version_ok &&
         (cfg_thc_response_trim != prev_response_trim)) {
         prev_response_trim = cfg_thc_response_trim;
         pending_thc_config_write = 1;
@@ -2085,8 +2129,10 @@ static int write(void *subdata)
     uint8_t payload_len = 0;
     uint8_t cmd = 0;
 
-    logging_compatible = (dthc_voltage_stream_ready &&
-                          fw_app_rev >= DTHC_VOLTAGE_HISTORY_FW_REV) ? 1 : 0;
+    fw_required_rev = DTHC_FW_REV;
+    logging_compatible = (dthc_voltage_stream_ready && fw_version_ok) ? 1 : 0;
+
+    dthc_update_host_vad(__comp_inst);
 
     if (update_enable || update_state != DTHC_UPDATE_RUN) {
         motor_test_armed = 0;
@@ -2152,7 +2198,7 @@ static int write(void *subdata)
     prev_write_autosettings = cmd_write_autosettings ? 1 : 0;
 
     if (cmd_request_control_profile && !prev_request_control_profile &&
-        (fw_app_rev >= DTHC_PROFILE_FW_REV)) {
+        fw_version_ok) {
         profile_action = DTHC_PROFILE_READ;
         profile_page = 0u;
         profile_waiting = 0u;
@@ -2165,7 +2211,7 @@ static int write(void *subdata)
 
     if (cmd_write_control_profile && !prev_write_control_profile &&
         fb_profile_valid && thc_prog_is_idle && !status_torch_on &&
-        !update_enable && (fw_app_rev >= DTHC_PROFILE_FW_REV)) {
+        !update_enable && fw_version_ok) {
         dthc_pins_to_profile(__comp_inst);
         profile_action = DTHC_PROFILE_WRITE;
         profile_page = 0u;
@@ -2203,6 +2249,22 @@ static int write(void *subdata)
         control_feed_scale_applied = 1.0;
     }
 
+    /* ---- Another firmware revision: THC off, configuration reads only ---- */
+    thc_disable_out = (internal_enable && fw_version_ok) ? 0 : 1;
+    if (!fw_version_ok) {
+        if (++trace_cycle >= 50u) {
+            trace_cycle = 0u;
+            pending_config_read = 1;
+        }
+        if (pending_config_read) {
+            pending_config_read = 0;
+            dthc_queue_frame(__comp_inst, DTHC_SPI_CMD_CONFIG, payload, 0u);
+        } else {
+            dthc_queue_frame(__comp_inst, 0u, payload, 0u);
+        }
+        return 0;
+    }
+
     /* ---- SPI command sequencing (highest priority first) ---- */
     if ((profile_action != DTHC_PROFILE_NONE) && !profile_waiting) {
         cmd = DTHC_SPI_CMD_PROFILE;
@@ -2226,8 +2288,7 @@ static int write(void *subdata)
     } else if (pending_config_read) {
         cmd = DTHC_SPI_CMD_CONFIG;
         pending_config_read = 0;
-    } else if (++trace_cycle >= (logging_enable ? 10u : 4u) &&
-               (fw_app_rev >= DTHC_OBSERVER_FW_REV)) {
+    } else if (++trace_cycle >= (logging_enable ? 10u : 4u)) {
         cmd = DTHC_SPI_CMD_TRACE;
         trace_cycle = 0u;
     } else {
