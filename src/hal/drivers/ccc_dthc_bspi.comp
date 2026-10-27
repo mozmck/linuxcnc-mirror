@@ -124,7 +124,6 @@ pin io u32 cfg.control.target-feed-ref "Point-9 reference feed F_ref, mm/min";
 pin io float cfg.control.target-feed-exponent "Point-9 feed exponent e; 0 holds C fixed";
 pin io float cfg.control.target-lead-mm "Point-9 kerf-front lead L, mm";
 pin io float cfg.control.target-cutoff "XY ratio below which point 9 would hold the THC";
-pin io float cfg.control.slowdown-min-scale "Minimum point-10 adaptive-feed recommendation";
 pin io float cfg.control.slowdown-z-margin;
 pin io float cfg.control.slowdown-attack;
 pin io float cfg.control.slowdown-release;
@@ -133,12 +132,8 @@ pin io u32 cfg.control.slowdown-delay-ms;
 pin io u32 cfg.control.slowdown-min-on-ms;
 pin io u32 cfg.control.slowdown-timeout-ms;
 /* Auto law (observer mode 3). */
-pin io u32 cfg.control.loop-delay-ms "Auto: voltage-to-Z loop delay used to derive every gain";
 pin io float cfg.control.brake-accel-fraction "Auto: fraction of Z acceleration the recovery curve brakes with";
-pin io u32 cfg.control.auto-flags "Auto: 1 kerf hold, 2 use the measured loop delay";
-pin io float cfg.control.kerf-threshold "Auto: unexplained voltage rise (V) that holds downward motion";
-pin io u32 cfg.control.kerf-hold-max-ms "Auto: longest kerf/edge hold";
-pin io float cfg.control.transition-error-mm "Auto: point-10 error budget for an abrupt end of slope; 0 disables";
+pin io u32 cfg.control.auto-flags "Auto: 1 kerf hold (its thresholds follow measured noise, travel and arc gain)";
 pin out bit fb.profile.valid;
 pin out bit fb.profile.provisional;
 pin out bit fb.profile.fault;
@@ -266,6 +261,10 @@ pin out float trace.confidence;
 pin out float trace.load;
 pin out float trace.rxy;
 pin out bit trace.kerf-hold "Auto: downward motion held for a kerf or edge";
+pin out bit trace.kerf-armed "Auto: kerf guard armed (after the startup correction)";
+pin out bit trace.kerf-recovering "Auto: downward authority returning after a hold";
+pin out bit trace.kerf-ramp "Auto: a steady, plate-like rise is building while held";
+pin out float trace.kerf-release "Auto: release qualification progress, 0-1";
 pin out bit trace.target-cutoff "Point 9 policy holds the THC now (the real hold with firmware VAD)";
 pin out bit trace.target-uncalibrated "Point 9: the process's C is not calibrated yet";
 pin out bit trace.model-cutoff "Point 9: the model's own cutoff would hold";
@@ -277,10 +276,10 @@ pin out float trace.learn-c "Point-9 C the model uses now, volts";
 pin out u32 trace.learn-count "Learned slowdowns of the C in use (0 = feed law)";
 pin out u32 trace.learn-status "Raw learner status: bits 0-3 flags, last result << 8";
 pin out bit trace.learn-learned "The model uses a learned C";
-pin out bit trace.learn-calibrated "The C in use is calibrated (two or more slowdowns)";
+pin out bit trace.learn-calibrated "The C in use is calibrated (two estimates in a row agreeing with the pool)";
 pin out bit trace.learn-scaled "The C in use is borrowed from a nearby feed";
 pin out bit trace.learn-store-due "Learned table not yet saved to flash";
-pin out u32 trace.learn-last-result "Last slowdown: 1 accepted, 2 short, 3 kerf, 4 Z, 5 timeout, 6 noise, 7 residual, 8 uncertain, 9 range, 10 interrupted, 11 held, 12 reset";
+pin out u32 trace.learn-last-result "Last slowdown: 1 accepted, 2 short, 3 kerf, 4 Z, 5 timeout, 6 noise, 7 residual, 8 uncertain, 9 range, 10 interrupted, 11 held, 12 reset, 13 plate slope";
 pin out float trace.learn-last-c "Last slowdown's fitted C, volts";
 pin out u32 trace.learn-accepts "Slowdowns learned since power-up";
 pin out u32 trace.learn-rejects "Slowdowns rejected since power-up";
@@ -295,11 +294,13 @@ pin out u32 trace.late-discards "Observer results discarded as late";
 pin out u32 trace.late-overwrites "Observer samples overwritten before they started";
 pin out u32 trace.kerf-holds "Kerf/edge holds since power-up";
 pin out u32 trace.bandwidth "Auto observer bandwidth in rad/s";
-pin out u32 trace.loop-delay-ms "Auto loop delay in use";
+pin out u32 trace.loop-delay-ms "Auto loop delay in use: 11 ms, or a slow Z's measured one (eight fits, median over 15 ms)";
 pin out float trace.noise-mm "Measured gap noise, one sigma";
-pin out float trace.delay-estimate "Measured realized-Z-to-voltage delay, ms";
-pin out float trace.arc-gain "Measured arc V/mm relative to 1/0.127 (1.0 = as assumed)";
-pin out u32 trace.ident-fits "Delay/arc-gain identification windows accepted";
+pin out float trace.delay-estimate "Measured realized-Z-to-voltage delay, ms: median of the last eight fits";
+pin out u32 trace.ident-fits "Delay identification windows accepted";
+pin out float trace.kerf-threshold-mm "Auto: kerf guard threshold now, gap mm";
+pin out float trace.kerf-excess-mm "Auto: unexplained rise now, gap mm";
+pin out u32 trace.kerf-window-ms "Auto: kerf guard travel window now, ms";
 /* Link and fault diagnostics.  Counts are since board power-up; they reset
  * only with power. */
 pin out u32 trace.spi-repairs "Replies resynchronised at a frame end (transmit side out of step)";
@@ -418,7 +419,7 @@ variable unsigned trace_cycle;
 variable unsigned trace_age_cycles;
 variable unsigned reported_fw_rev;
 variable uint32_t host_sample_sequence;
-variable uint8_t profile_bytes[79];
+variable uint8_t profile_bytes[71];
 
 /* ---- Online countdown ---- */
 variable unsigned online_countdown;
@@ -558,9 +559,9 @@ enum {
 /* 21 HAL stream slots: two ticks, packed sample flags, 17 floats, packed trace flags. */
 #define DTHC_VOLTAGE_STREAM_TYPES   "uuufffffffffffffffffu"
 /* The one firmware revision this driver speaks; the profile is version 6,
- * 79 bytes, in three pages. */
-#define DTHC_FW_REV                 27u
-#define DTHC_PROFILE_BYTES          79u
+ * 75 bytes, in three pages. */
+#define DTHC_FW_REV                 28u
+#define DTHC_PROFILE_BYTES          71u
 #define DTHC_VAD_MODE_HOST          0u
 #define DTHC_VAD_MODE_AUTO          2u
 #define DTHC_PROFILE_PAGE_BYTES     28u
@@ -1044,7 +1045,7 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
     cfg_autoset_lower_tol = fb_autoset_lower_tol;
 }
 
-/* Profile version 6, 79 bytes, big-endian (thc_profile_serialize()):
+/* Profile version 7, 75 bytes, big-endian (thc_profile_serialize()):
  *   [0..3] generation, [4..6] observer/target/slowdown mode,
  *   [7] feedforward cap, [8..11] deadzone min/max (Q4), [12..15] kquiet
  *   (Q16), [16..31] e spans (nm), [32..35] alpha/beta (Q16), [36..39]
@@ -1054,8 +1055,7 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
  *   offset (Q4), [54..55] F_ref (mm/min), [56..57] lead (um), [58..62]
  *   slowdown min scale, Z margin, attack, release, min confidence, [63]
  *   target cutoff, [64..69] slowdown delay, min on, timeout (ms), [70..72]
- *   loop delay, brake share, Auto flags, [73..74] kerf threshold (Q4),
- *   [75..76] kerf hold max (ms), [77..78] transition error (um). */
+ *   loop delay, brake share, Auto flags, [73..74] transition error (um). */
 static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 {
     cfg_control_observer_mode = profile_bytes[4];
@@ -1086,22 +1086,16 @@ static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
         (double)dthc_get_u16(profile_bytes + 52) / 16.0;
     cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 54);
     cfg_control_target_lead_mm = (double)dthc_get_u16(profile_bytes + 56) / 1000.0;
-    cfg_control_slowdown_min_scale = (double)profile_bytes[58] / 255.0;
-    cfg_control_slowdown_z_margin = (double)profile_bytes[59] / 255.0;
-    cfg_control_slowdown_attack = (double)profile_bytes[60] / 255.0;
-    cfg_control_slowdown_release = (double)profile_bytes[61] / 255.0;
-    cfg_control_slowdown_min_conf = (double)profile_bytes[62] / 255.0;
-    cfg_control_target_cutoff = (double)profile_bytes[63] / 255.0;
-    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 64);
-    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 66);
-    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 68);
-    cfg_control_loop_delay_ms = profile_bytes[70];
-    cfg_control_brake_accel_fraction = (double)profile_bytes[71] / 256.0;
-    cfg_control_auto_flags = profile_bytes[72];
-    cfg_control_kerf_threshold = (double)dthc_get_u16(profile_bytes + 73) / 16.0;
-    cfg_control_kerf_hold_max_ms = dthc_get_u16(profile_bytes + 75);
-    cfg_control_transition_error_mm =
-        (double)dthc_get_u16(profile_bytes + 77) / 1000.0;
+    cfg_control_slowdown_z_margin = (double)profile_bytes[58] / 255.0;
+    cfg_control_slowdown_attack = (double)profile_bytes[59] / 255.0;
+    cfg_control_slowdown_release = (double)profile_bytes[60] / 255.0;
+    cfg_control_slowdown_min_conf = (double)profile_bytes[61] / 255.0;
+    cfg_control_target_cutoff = (double)profile_bytes[62] / 255.0;
+    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 63);
+    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 65);
+    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 67);
+    cfg_control_brake_accel_fraction = (double)profile_bytes[69] / 256.0;
+    cfg_control_auto_flags = profile_bytes[70];
     fb_profile_generation = dthc_get_u32(profile_bytes + 0);
     fb_profile_length = DTHC_PROFILE_BYTES;
     fb_profile_valid = 1;
@@ -1156,29 +1150,21 @@ static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
         dthc_encode_u16(cfg_control_target_feed_ref));
     dthc_put_u16(profile_bytes + 56,
         dthc_encode_u16(cfg_control_target_lead_mm * 1000.0));
-    profile_bytes[58] = dthc_encode_fraction_q8(cfg_control_slowdown_min_scale);
-    profile_bytes[59] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
-    profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
-    profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
-    profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
-    profile_bytes[63] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
-    dthc_put_u16(profile_bytes + 64,
+    profile_bytes[58] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
+    profile_bytes[59] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
+    profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
+    profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
+    profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
+    dthc_put_u16(profile_bytes + 63,
         dthc_encode_u16(cfg_control_slowdown_delay_ms));
-    dthc_put_u16(profile_bytes + 66,
+    dthc_put_u16(profile_bytes + 65,
         dthc_encode_u16(cfg_control_slowdown_min_on_ms));
-    dthc_put_u16(profile_bytes + 68,
+    dthc_put_u16(profile_bytes + 67,
         dthc_encode_u16(cfg_control_slowdown_timeout_ms));
     brake = cfg_control_brake_accel_fraction * 256.0 + 0.5;
-    profile_bytes[70] = dthc_clamp_u8(cfg_control_loop_delay_ms);
-    profile_bytes[71] = (brake < 1.0) ? 1u :
+    profile_bytes[69] = (brake < 1.0) ? 1u :
                         (brake > 255.0) ? 255u : (uint8_t)brake;
-    profile_bytes[72] = dthc_clamp_u8(cfg_control_auto_flags);
-    dthc_put_u16(profile_bytes + 73,
-        dthc_encode_q4(cfg_control_kerf_threshold));
-    dthc_put_u16(profile_bytes + 75,
-        dthc_encode_u16(cfg_control_kerf_hold_max_ms));
-    dthc_put_u16(profile_bytes + 77,
-        dthc_encode_u16(cfg_control_transition_error_mm * 1000.0));
+    profile_bytes[70] = dthc_clamp_u8(cfg_control_auto_flags);
 }
 
 static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
@@ -1270,6 +1256,19 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
     trace_control_volts = (double)dthc_get_u16(payload + 14) / 16.0;
     trace_confidence = (double)payload[16] / 255.0;
     trace_load = (double)payload[17] / 255.0;
+    /* In Auto, byte 17 carries the kerf guard's state instead of load. */
+    if (cfg_control_observer_mode == 3u) {
+        uint8_t guard = payload[17];
+        trace_kerf_armed = (guard & 0x01u) ? 1 : 0;
+        trace_kerf_recovering = (guard & 0x04u) ? 1 : 0;
+        trace_kerf_ramp = (guard & 0x08u) ? 1 : 0;
+        trace_kerf_release = (double)(guard >> 4) / 15.0;
+    } else {
+        trace_kerf_armed = 0;
+        trace_kerf_recovering = 0;
+        trace_kerf_ramp = 0;
+        trace_kerf_release = 0.0;
+    }
     trace_rxy = (double)payload[18] / 255.0;
     control_feed_scale_candidate = (double)payload[19] / 255.0;
     trace_g_hat_mm = (double)dthc_get_s24(payload + 20) / 1000.0;
@@ -1306,7 +1305,7 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 6: break; /* response trim; fb.thc.response-trim has it */
         case 7: trace_noise_mm = (double)value / 1000.0; break;
         case 8: trace_delay_estimate = (double)value / 10.0; break;
-        case 9: trace_arc_gain = (double)value / 256.0; break;
+        case 9: trace_kerf_window_ms = value; break;
         case 10: trace_ident_fits = value; break;
         case 11: trace_spi_repairs = value; break;
         case 12: trace_spi_tx_underflows = value; break;
@@ -1347,6 +1346,8 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
             trace_learn_store_failed = (value & 0x8000u) ? 1 : 0;
             break;
         case 38: trace_learn_z_skips = value; break;
+        case 39: trace_kerf_threshold_mm = (double)value / 1000.0; break;
+        case 40: trace_kerf_excess_mm = (double)(int16_t)value / 1000.0; break;
         default: break;
         }
     }
