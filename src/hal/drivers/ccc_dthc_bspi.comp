@@ -38,7 +38,9 @@ CMD_DATA requests are 18 bytes:
   byte 1      XY response scale, actual / programmed feed, 0..255
               (255 while VAD is off or the program is idle)
   byte 2      runtime flags: 0x01 XY velocity valid, 0x0E voltage history
-  bytes 3-6   nominal XY feed, units/min Q16.16 (point 10's scale removed)
+  bytes 3-6   nominal XY feed, units/min Q16.16 (point 10's scale removed;
+              the last non-zero programmed feed through feed holds, dwells
+              and rapids while a program runs)
   bytes 7-10  actual XY speed, units/min Q16.16
   bytes 11-14 host sample sequence
   byte 15     speed hold: 0 host thcenable, 1 firmware VAD, 2 Auto VAD
@@ -189,11 +191,9 @@ pin out bit fb.motor.metric-units;
 /* ---- Autoset parameters ---- */
 pin io float cfg.autoset.upper-tol "Autoset upper tolerance in volts";
 pin io float cfg.autoset.lower-tol "Autoset lower tolerance in volts";
-pin io float cfg.autoset.delay "Autoset delay in seconds (written by auto-delay calculation)";
 
 pin out float fb.autoset.upper-tol;
 pin out float fb.autoset.lower-tol;
-pin out float fb.autoset.delay;
 
 /* ---- Live data from firmware ---- */
 pin out u32 data.tip-volts "Measured arc voltage in volts";
@@ -301,6 +301,11 @@ pin out u32 trace.ident-fits "Delay identification windows accepted";
 pin out float trace.kerf-threshold-mm "Auto: kerf guard threshold now, gap mm";
 pin out float trace.kerf-excess-mm "Auto: unexplained rise now, gap mm";
 pin out u32 trace.kerf-window-ms "Auto: kerf guard travel window now, ms";
+/* Auto-Set's last request (development; the operator sees the lamps). */
+pin out u32 trace.autoset-result "Auto-Set: 0 none, 1 good, 2 out of tolerance, 3 unstable, 4 no full feed, 5 reduced feed, 6 torch off first";
+pin out u32 trace.autoset-count "Auto-Set: good samples in the running mean (1-4)";
+pin out float trace.autoset-volts "Auto-Set: the last 50 ms sample, volts (0 if none)";
+pin out u32 trace.autoset-hold-ms "Auto-Set: Z held past the THC delay, ms";
 /* Link and fault diagnostics.  Counts are since board power-up; they reset
  * only with power. */
 pin out u32 trace.spi-repairs "Replies resynchronised at a frame end (transmit side out of step)";
@@ -325,7 +330,7 @@ pin out float control.feed-scale-applied = 1.0 "Connect only in DTHC6 plasma con
 
 /* ---- Voltage logging ---- */
 pin in bit logging.enable "Forward packed firmware history to the private userspace stream";
-pin in float logging.xy-velocity-commanded "Feed-adjusted commanded XY vector velocity";
+pin in float logging.xy-velocity-commanded "Commanded XY feed: the programmed feed (motion.feed-*-per-second); its last non-zero value is held while a program runs, through feed holds, dwells and rapids";
 pin in float logging.xy-velocity-realtime "Actual XY vector velocity from motion.current-vel";
 pin out bit logging.compatible "Firmware and host stream support voltage-history logging";
 pin out u32 logging.stream-overruns "Samples dropped because the userspace stream was full";
@@ -455,6 +460,10 @@ variable unsigned thc_err_displayed;
 variable double last_gcode_cmd;
 variable unsigned plasma_current_percent;
 
+/* ---- Programmed XY feed, held through stops (dthc_update_xy_feed) ---- */
+variable double xy_nominal_feed;
+variable double xy_commanded_feed;
+
 /* ---- Auto-delay calculation ---- */
 variable double thc_auto_delay;
 variable unsigned prev_vad_enabled;
@@ -560,7 +569,7 @@ enum {
 #define DTHC_VOLTAGE_STREAM_TYPES   "uuufffffffffffffffffu"
 /* The one firmware revision this driver speaks; the profile is version 6,
  * 75 bytes, in three pages. */
-#define DTHC_FW_REV                 28u
+#define DTHC_FW_REV                 29u
 #define DTHC_PROFILE_BYTES          71u
 #define DTHC_VAD_MODE_HOST          0u
 #define DTHC_VAD_MODE_AUTO          2u
@@ -862,7 +871,7 @@ static void dthc_stream_voltage_sample(struct __comp_state *__comp_inst,
     sample[2].u = ((packed >> 15) & 1u) |
                   (((packed >> 14) & 1u) << 1) |
                   (((packed >> 13) & 1u) << 2);
-    sample[3].f = logging_xy_velocity_commanded;
+    sample[3].f = xy_commanded_feed;   /* as the firmware sees it: held */
     sample[4].f = logging_xy_velocity_realtime;
     sample[5].f = (double)(packed & 0x1FFFu) / 16.0;
     sample[6].f = trace_base_target;
@@ -1029,14 +1038,13 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
                                           const uint8_t *payload,
                                           uint8_t payload_len)
 {
-    if (payload_len < 4) {
+    if (payload_len < 2) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
     }
-    fb_autoset_upper_tol = (double)payload[0]                / 16.0;
-    fb_autoset_lower_tol = (double)payload[1]                / 16.0;
-    fb_autoset_delay     = (double)dthc_get_u16(payload + 2) / 1000.0;
+    fb_autoset_upper_tol = (double)payload[0] / 16.0;
+    fb_autoset_lower_tol = (double)payload[1] / 16.0;
     comm_autosettings_valid = 1;
 
     /* Echo writable cfg pins back from firmware so the GUI sees the
@@ -1348,6 +1356,13 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 38: trace_learn_z_skips = value; break;
         case 39: trace_kerf_threshold_mm = (double)value / 1000.0; break;
         case 40: trace_kerf_excess_mm = (double)(int16_t)value / 1000.0; break;
+        /* Auto-Set (firmware 2.9). */
+        case 41:
+            trace_autoset_result = value & 0xffu;
+            trace_autoset_count = value >> 8;
+            break;
+        case 42: trace_autoset_volts = (double)value / 16.0; break;
+        case 43: trace_autoset_hold_ms = value; break;
         default: break;
         }
     }
@@ -1359,6 +1374,38 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
 /* ================================================================
  * Payload builders
  * ================================================================ */
+
+/* Point 10's applied feed scale, 0.05..1. */
+static double dthc_point10_scale(struct __comp_state *__comp_inst)
+{
+    double scale = ((control_feed_scale_applied > 0.0) &&
+                    (control_feed_scale_applied < 1.0)) ?
+                   control_feed_scale_applied : 1.0;
+    return (scale < 0.05) ? 0.05 : scale;
+}
+
+/* The programmed feed (logging.xy-velocity-commanded) reads 0 during
+ * rapids and dwells, and while feed hold or feed inhibit (the THC HOLD
+ * line) stops the machine.  Hold the last non-zero value while the program
+ * runs, as thcenable does, so a stop with the torch on reads as a slowdown
+ * to 0, not as full speed, and the firmware keeps the point-9 gains of the
+ * feed it was cutting at.  The pin includes point 10's adaptive feed; the
+ * nominal feed has that scale divided back out, since a point-10 slowdown
+ * is a real slowdown to the arc but not a corner.  The nominal is what is
+ * held, so a scale change during a stop moves only the commanded feed, as
+ * it would the pin.  Every servo cycle, after point 10's update. */
+static void dthc_update_xy_feed(struct __comp_state *__comp_inst)
+{
+    double point10_scale = dthc_point10_scale(__comp_inst);
+
+    if (logging_xy_velocity_commanded > 0.0)
+        xy_nominal_feed = logging_xy_velocity_commanded / point10_scale;
+    else if (thc_prog_is_idle)
+        xy_nominal_feed = 0.0;
+    xy_commanded_feed = (logging_xy_velocity_commanded > 0.0) ?
+                        logging_xy_velocity_commanded :
+                        xy_nominal_feed * point10_scale;
+}
 
 /* Speed-hold mode for the firmware: the operator's choice while VAD is on
  * and a program runs (thcenable's own conditions), else the host's gate,
@@ -1438,22 +1485,15 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
 
     /* Velocity-adaptive response: actual over programmed XY speed (255 at
      * full feed, or with VAD off or the program idle).  The programmed feed
-     * (motion.feed-*-per-second) already includes point 10's adaptive feed;
-     * the firmware's nominal feed has that scale divided back out, since a
-     * point-10 slowdown is a real slowdown to the arc but not a corner. */
-    double point10_scale = ((control_feed_scale_applied > 0.0) &&
-                            (control_feed_scale_applied < 1.0)) ?
-                           control_feed_scale_applied : 1.0;
-    if (point10_scale < 0.05)
-        point10_scale = 0.05;
-    double nominal_feed = logging_xy_velocity_commanded / point10_scale;
+     * is held through stops (dthc_update_xy_feed()), so a feed hold reads
+     * as a slowdown to 0. */
+    double point10_scale = dthc_point10_scale(__comp_inst);
 
     payload[1] = 255u;
     if (thc_vad_enabled && !thc_prog_is_idle &&
-        (logging_xy_velocity_commanded > 0.000001) &&
+        (xy_commanded_feed > 0.000001) &&
         (logging_xy_velocity_realtime >= 0.0)) {
-        double ratio = logging_xy_velocity_realtime /
-                       logging_xy_velocity_commanded;
+        double ratio = logging_xy_velocity_realtime / xy_commanded_feed;
 
         if (ratio <= 0.0)
             payload[1] = 0u;
@@ -1471,7 +1511,7 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
     if (logging_enable)
         runtime_flags |= 0x0Eu; /* tick-anchored history with sampled THC enable */
     payload[2] = runtime_flags;
-    dthc_put_u32(payload + 3, dthc_encode_uq16(nominal_feed * 60.0));
+    dthc_put_u32(payload + 3, dthc_encode_uq16(xy_nominal_feed * 60.0));
     dthc_put_u32(payload + 7,
         dthc_encode_uq16(logging_xy_velocity_realtime * 60.0));
     dthc_put_u32(payload + 11, ++host_sample_sequence);
@@ -1569,16 +1609,14 @@ static uint8_t dthc_build_motor_config_payload(struct __comp_state *__comp_inst,
     return 20;
 }
 
-/* CMD_AUTOSETTINGS payload, 4 bytes */
+/* CMD_AUTOSETTINGS payload, 2 bytes: the tolerances.  The firmware times
+ * its sample from the measured XY speed (firmware 2.9). */
 static uint8_t dthc_build_autosettings_payload(struct __comp_state *__comp_inst,
                                                uint8_t *payload)
 {
-    double delay_val = (thc_auto_delay > 0.0) ? thc_auto_delay : cfg_autoset_delay;
-
     payload[0] = dthc_clamp_u8(dthc_encode_q4(cfg_autoset_upper_tol));
     payload[1] = dthc_clamp_u8(dthc_encode_q4(cfg_autoset_lower_tol));
-    dthc_put_u16(payload + 2, dthc_encode_ms(delay_val));
-    return 4;
+    return 2;
 }
 
 static void dthc_queue_frame(struct __comp_state *__comp_inst, uint8_t cmd,
@@ -2067,7 +2105,8 @@ static void dthc_handle_gcode_cmd(struct __comp_state *__comp_inst)
 }
 
 /* ================================================================
- * VAD / XY-accel auto-delay calculation
+ * VAD / XY-accel auto-delay calculation: the THC delay when
+ * thc.autodelay is set.  Auto-Set has no delay (firmware 2.9).
  * ================================================================ */
 static void dthc_update_auto_delay(struct __comp_state *__comp_inst)
 {
@@ -2091,9 +2130,6 @@ static void dthc_update_auto_delay(struct __comp_state *__comp_inst)
     thc_auto_delay = 5.8333 / accel;
     if (vad_en && vad_pct > 0)
         thc_auto_delay -= thc_auto_delay * ((double)vad_pct / 100.0);
-
-    cfg_autoset_delay = thc_auto_delay;
-    pending_autosettings_write = 1;
 
     if (thc_autodelay)
         pending_thc_config_write = 1;
@@ -2249,6 +2285,7 @@ static int write(void *subdata)
     } else {
         control_feed_scale_applied = 1.0;
     }
+    dthc_update_xy_feed(__comp_inst);
 
     /* ---- Another firmware revision: THC off, configuration reads only ---- */
     thc_disable_out = (internal_enable && fw_version_ok) ? 0 : 1;

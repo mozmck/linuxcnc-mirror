@@ -1,6 +1,6 @@
 // This component is for enabling/disabling the CandCNC THC
 // THC can be disabled by any of three input pin, or when motion.current_vel
-// drops below the given percentage of motion.requested_vel
+// drops below the given percentage of the programmed feed (requested_vel)
 
 component thcenable "Turn off output when disabled, or when current-vel < percentage of requested-vel";
 
@@ -9,7 +9,7 @@ license "GPLv2 or greater";
 option singleton yes;
 
 pin in float current_vel "Value being compared - motion.current-vel";
-pin in float requested_vel "Reference value - motion.requested-vel";
+pin in float requested_vel "Reference value - the programmed feed (motion.feed-*-per-second); its last non-zero value is held while a program runs, through feed holds, dwells and rapids";
 pin in signed percent "Percentage of requested-vel, must be between 0 and 100";
 pin in bit enable "If true, the cornerlock logic is enabled.  External disables always work.";
 pin in bit prog_is_idle "connect to halui.program.is-idle";
@@ -30,6 +30,8 @@ param rw float hyst=0.0 "Hysteresis of the comparator (default 0.0)";
 //variable double m;
 variable double diff;
 variable double halfhyst;
+variable double reference_vel;
+variable double last_requested_vel;
 
 
 function _ fp "Update output based on inputs";
@@ -37,6 +39,16 @@ function _ fp "Update output based on inputs";
 ;;
 
 FUNCTION(_) {
+    // The programmed feed reads 0 during rapids and dwells, and while feed
+    // hold or feed inhibit (the THC HOLD line) stops the machine.  Hold its
+    // last non-zero value while the program runs, so a stop with the torch
+    // on reads as a slowdown (THC off) rather than as "no reference".
+    if (prog_is_idle)
+        last_requested_vel = 0.0;
+    else if (requested_vel > 0.0)
+        last_requested_vel = requested_vel;
+    reference_vel = (requested_vel > 0.0) ? requested_vel : last_requested_vel;
+
     if (extdisable0 || extdisable1 || extdisable2)  //always disable for external disable pins
     {
         out = 0;
@@ -45,7 +57,7 @@ FUNCTION(_) {
 	{
 		//m = percent / 100.0;
 		//d_m = m;
-		diff = current_vel - (requested_vel * percent)/100.0;
+		diff = current_vel - (reference_vel * percent)/100.0;
 		//d_diff = diff;
 		halfhyst = 0.5 * hyst;
         if (diff < -halfhyst) {
