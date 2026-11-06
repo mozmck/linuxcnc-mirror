@@ -37,7 +37,10 @@ CMD_DATA requests are 18 bytes:
   byte 0      control flags (above)
   byte 1      XY response scale, actual / programmed feed, 0..255
               (255 while VAD is off or the program is idle)
-  byte 2      runtime flags: 0x01 XY velocity valid, 0x0E voltage history
+  byte 2      runtime flags: 0x01 XY velocity valid, 0x0E voltage history,
+              0x10 point 9 on (AVAD: thc.vad-enabled and thc.vad-auto),
+              0x20 point 10 on (thc.slowdown-enable); the firmware runs a
+              point that is off as Off, whatever the profile says
   bytes 3-6   nominal XY feed, units/min Q16.16 (point 10's scale removed;
               the last non-zero programmed feed through feed holds, dwells
               and rapids while a program runs)
@@ -47,8 +50,9 @@ CMD_DATA requests are 18 bytes:
   byte 16     VAD percent
   byte 17     point 10's applied feed scale, Q8
 
-With VAD on, a program running and thc.vad-mode 1 or 2, the firmware holds Z
-itself, and once its trace confirms the mode, thc.host-vad-enable turns
+The THC panel's OFF | VAD | AVAD control drives thc.vad-enabled (VAD or
+AVAD) and thc.vad-auto (AVAD).  With VAD on and a program running, the
+firmware holds Z itself, and once its trace confirms the mode, thc.host-vad-enable turns
 thcenable's speed gate off; external disables still work.  High-rate voltage
 history is requested only while logging.enable is true; normal operation
 uses trace telemetry.  Each history sample packs Q4 volts in bits 0..12,
@@ -361,9 +365,10 @@ pin io bit thc.stop-on-fault "When true, assert prog-stop-out on fault while gco
 pin out bit thc.prog-stop-out "Assert to stop program on fault; connect to halui.program.stop";
 
 /* ---- Velocity anti-dive / auto-delay inputs ---- */
-pin in bit thc.vad-enabled "Velocity anti-dive enabled";
+pin in bit thc.vad-enabled "Velocity anti-dive on: the THC panel's VAD or AVAD";
+pin in bit thc.vad-auto = 1 "With VAD on: Auto VAD with point 9 (AVAD); false: the firmware's plain VAD";
 pin in s32 thc.vad-percent "VAD percentage (from thcenable.percent)";
-pin in u32 thc.vad-mode "Speed hold: 0 host thcenable, 1 firmware VAD, 2 Auto VAD";
+pin in bit thc.slowdown-enable "Point 10 auto-slowdown on (the THC panel's check)";
 pin out bit thc.host-vad-enable "thcenable speed gate: thc.vad-enabled unless the firmware holds for speed; connect to thcenable.enable";
 pin in float thc.xy-accel "XY axis acceleration in units/sec^2 (used for auto-delay calc)";
 pin in bit thc.autodelay "When true, use auto-calculated THC delay instead of cfg.thc.delay";
@@ -567,11 +572,12 @@ enum {
 #define DTHC_VOLTAGE_STREAM_DEPTH   50000
 /* 21 HAL stream slots: two ticks, packed sample flags, 17 floats, packed trace flags. */
 #define DTHC_VOLTAGE_STREAM_TYPES   "uuufffffffffffffffffu"
-/* The one firmware revision this driver speaks; the profile is version 6,
- * 75 bytes, in three pages. */
-#define DTHC_FW_REV                 29u
+/* The one firmware revision this driver speaks; the profile is version 8,
+ * 71 bytes, in three pages. */
+#define DTHC_FW_REV                 30u
 #define DTHC_PROFILE_BYTES          71u
 #define DTHC_VAD_MODE_HOST          0u
+#define DTHC_VAD_MODE_FIRMWARE      1u
 #define DTHC_VAD_MODE_AUTO          2u
 #define DTHC_PROFILE_PAGE_BYTES     28u
 #define DTHC_PROFILE_PAGE_COUNT     3u
@@ -1053,17 +1059,19 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
     cfg_autoset_lower_tol = fb_autoset_lower_tol;
 }
 
-/* Profile version 7, 75 bytes, big-endian (thc_profile_serialize()):
+/* Profile version 8, 71 bytes, big-endian (thc_profile_serialize()):
  *   [0..3] generation, [4..6] observer/target/slowdown mode,
  *   [7] feedforward cap, [8..11] deadzone min/max (Q4), [12..15] kquiet
  *   (Q16), [16..31] e spans (nm), [32..35] alpha/beta (Q16), [36..39]
  *   residual clip (nm), [40..41] decay (Q16), [42..45] confidence rise,
  *   fall, min apply, evidence ticks, [46..48] VAD down min, lock, unlock,
  *   [49] target feed exponent (centi), [50..51] C_ref (mV), [52..53] max
- *   offset (Q4), [54..55] F_ref (mm/min), [56..57] lead (um), [58..62]
- *   slowdown min scale, Z margin, attack, release, min confidence, [63]
- *   target cutoff, [64..69] slowdown delay, min on, timeout (ms), [70..72]
- *   loop delay, brake share, Auto flags, [73..74] transition error (um). */
+ *   offset (Q4), [54..55] F_ref (mm/min), [56..57] lead (um), [58..61]
+ *   slowdown Z margin, attack, release, min confidence, [62] target
+ *   cutoff, [63..68] slowdown delay, min on, timeout (ms), [69] brake
+ *   share, [70] Auto flags.  The target and slowdown modes are the
+ *   stored ones; at run time point 9 runs only in AVAD (thc.vad-enabled
+ *   and thc.vad-auto) and point 10 only with thc.slowdown-enable. */
 static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 {
     cfg_control_observer_mode = profile_bytes[4];
@@ -1407,15 +1415,14 @@ static void dthc_update_xy_feed(struct __comp_state *__comp_inst)
                         xy_nominal_feed * point10_scale;
 }
 
-/* Speed-hold mode for the firmware: the operator's choice while VAD is on
+/* Speed-hold mode for the firmware: the panel's VAD or AVAD while VAD is on
  * and a program runs (thcenable's own conditions), else the host's gate,
  * which then passes the THC anyway. */
 static unsigned dthc_vad_mode_sent(struct __comp_state *__comp_inst)
 {
     if (!thc_vad_enabled || thc_prog_is_idle)
         return DTHC_VAD_MODE_HOST;
-    return (thc_vad_mode > DTHC_VAD_MODE_AUTO) ? DTHC_VAD_MODE_HOST :
-                                                 thc_vad_mode;
+    return thc_vad_auto ? DTHC_VAD_MODE_AUTO : DTHC_VAD_MODE_FIRMWARE;
 }
 
 /* thcenable's speed gate stays on unless the firmware holds for speed: the
@@ -1442,8 +1449,8 @@ static void dthc_update_host_vad(struct __comp_state *__comp_inst)
  *   bit 6 : use_enable_pin
  *   bit 7 : motor_down
  *   byte 1: response scale, 0..255 (255 = full response)
- *   bytes 2-14: runtime flags, nominal and actual XY (units/min Q16.16),
- *            host sequence
+ *   bytes 2-14: runtime flags (with the point 9 and point 10 checks),
+ *            nominal and actual XY (units/min Q16.16), host sequence
  *   bytes 15-17: speed-hold mode, VAD percent, point 10's applied feed
  *            scale Q8
  */
@@ -1510,6 +1517,10 @@ static uint8_t dthc_build_data_payload(struct __comp_state *__comp_inst,
         runtime_flags |= 0x01u;
     if (logging_enable)
         runtime_flags |= 0x0Eu; /* tick-anchored history with sampled THC enable */
+    if (thc_vad_enabled && thc_vad_auto)
+        runtime_flags |= 0x10u; /* point 9, AVAD only */
+    if (thc_slowdown_enable)
+        runtime_flags |= 0x20u; /* point 10 */
     payload[2] = runtime_flags;
     dthc_put_u32(payload + 3, dthc_encode_uq16(xy_nominal_feed * 60.0));
     dthc_put_u32(payload + 7,
@@ -2280,7 +2291,8 @@ static int write(void *subdata)
         !(trace_mode_flags & 0x01u)) {
         control_feed_scale_candidate = 1.0;
         control_feed_scale_applied = 1.0;
-    } else if (trace_mode_flags & 0x10u) {
+    } else if ((trace_mode_flags & 0x10u) && thc_slowdown_enable) {
+        /* The check takes effect now; the trace follows a frame later. */
         control_feed_scale_applied = control_feed_scale_candidate;
     } else {
         control_feed_scale_applied = 1.0;
