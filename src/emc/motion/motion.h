@@ -182,6 +182,7 @@ extern "C" {
         EMCMOT_SET_SPINDLE_PARAMS, /* One command to set all spindle params */
         
         EMCMOT_SET_TELEOP_JOG_NO_HOME, /* set variable to allow teleop jog without homing */
+        EMCMOT_SET_JOINT_PRIMARY, /* primary joint for a shared trivkins axis */
 
     } cmd_code_t;
 
@@ -273,6 +274,7 @@ extern "C" {
     double ext_offset_vel;	/* velocity for an external axis offset */
     double ext_offset_acc;	/* acceleration for an external axis offset */
     struct state_tag_t tag;
+    int primary_joint;          /* used by EMCMOT_SET_JOINT_PRIMARY */
     } emcmot_command_t;
 
 /*! \todo FIXME - these packed bits might be replaced with chars
@@ -442,6 +444,7 @@ Suggestion: Split this in to an Error and a Status flag register..
 
 	/* configuration info - changes rarely */
 	int type;		/* 0 = linear, 1 = rotary */
+	int primary_joint;      /* self unless sharing a trivkins axis */
 	double max_pos_limit;	/* upper soft limit on joint pos */
 	double min_pos_limit;	/* lower soft limit on joint pos */
 	double max_jog_limit;	/* jog limits change when not homed */

@@ -859,6 +859,68 @@ static void check_for_faults(void)
     }
 }
 
+/* Rebase unhomed gantry joints before inverse kinematics makes all
+   joints on an axis share one coordinate.  Equal and opposite changes to
+   joint position and motor offset leave the motor command and ferror intact.
+   The mapping is supplied only for trivkins; other kinematics use self. */
+static void sync_unhomed_gantry_joints(void)
+{
+    int joint_num, primary;
+    bool gantry = 0;
+    double positions[EMCMOT_MAX_JOINTS] = {0};
+
+    for (primary = 0; primary < NO_OF_KINS_JOINTS; primary++) {
+        int anchor = primary;
+        bool shared = 0, unhomed = !get_homed(primary);
+        if (joints[primary].primary_joint != primary
+            || !GET_JOINT_ACTIVE_FLAG(&joints[primary])) {
+            continue;
+        }
+        for (joint_num = primary + 1; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+            if (joints[joint_num].primary_joint != primary
+                || !GET_JOINT_ACTIVE_FLAG(&joints[joint_num])) {
+                continue;
+            }
+            shared = 1;
+            unhomed |= !get_homed(joint_num);
+            /* A stopped abort may leave one side already homed.  Retain
+               its established coordinate and rebase the unhomed side. */
+            if (get_homed(joint_num) && !get_homed(anchor)) {
+                anchor = joint_num;
+            }
+        }
+        if (!shared || !unhomed) {
+            continue;
+        }
+        gantry = 1;
+        for (joint_num = primary; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+            emcmot_joint_t *joint = &joints[joint_num];
+            double offset;
+            if (joint->primary_joint != primary || get_homed(joint_num)
+                || !GET_JOINT_ACTIVE_FLAG(joint)) {
+                continue;
+            }
+            offset = joints[anchor].pos_cmd - joint->pos_cmd;
+            joint->pos_cmd += offset;
+            joint->pos_fb += offset;
+            joint->motor_offset -= offset;
+            joint->free_tp.curr_pos = joint->pos_cmd;
+            joint->free_tp.pos_cmd = joint->pos_cmd;
+            joint->coarse_pos = joint->pos_cmd;
+            cubicDrain(&joint->cubic);
+        }
+    }
+    if (gantry) {
+        /* In particular, trivkins with kinstype=both does not update the
+           Cartesian position in free mode while any joint is unhomed. */
+        for (joint_num = 0; joint_num < NO_OF_KINS_JOINTS; joint_num++) {
+            positions[joint_num] = joints[joint_num].pos_cmd;
+            joints[joint_num].coarse_pos = positions[joint_num];
+        }
+        kinematicsForward(positions, &emcmotStatus->carte_pos_cmd, &fflags, &iflags);
+    }
+}
+
 static void set_operating_mode(void)
 {
     int joint_num;
@@ -895,6 +957,9 @@ static void set_operating_mode(void)
 
     /* check for emcmotInternal->enabling */
     if (emcmotInternal->enabling && !GET_MOTION_ENABLE_FLAG()) {
+        if (GET_MOTION_TELEOP_FLAG() || GET_MOTION_COORD_FLAG()) {
+            sync_unhomed_gantry_joints();
+        }
         if (*(emcmot_hal_data->eoffset_limited)) {
             reportError("Note: Motion enabled after reaching a coordinate "
                         "soft limit with active external offsets");
@@ -926,7 +991,8 @@ static void set_operating_mode(void)
 
     /* check for entering teleop mode */
     if (emcmotInternal->teleoperating && !GET_MOTION_TELEOP_FLAG()) {
-	if (GET_MOTION_INPOS_FLAG()) {
+	if (GET_MOTION_INPOS_FLAG() && !get_homing_is_active()) {
+	    sync_unhomed_gantry_joints();
 
 	    /* update coordinated emcmotInternal->coord_tp position */
 	    tpSetPos(&emcmotInternal->coord_tp, &emcmotStatus->carte_pos_cmd);
@@ -975,7 +1041,8 @@ static void set_operating_mode(void)
 
 	/* check for entering coordinated mode */
 	if (emcmotInternal->coordinating && !GET_MOTION_COORD_FLAG()) {
-	    if (GET_MOTION_INPOS_FLAG()) {
+	    if (GET_MOTION_INPOS_FLAG() && !get_homing_is_active()) {
+		sync_unhomed_gantry_joints();
 		/* preset traj planner to current position */
 
                 // subtract at coord mode start

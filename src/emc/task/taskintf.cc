@@ -16,6 +16,8 @@
 #include <float.h>		// DBL_MAX
 #include <string.h>		// memcpy() strncpy()
 #include <unistd.h>             // unlink()
+#include <sstream>
+#include <string>
 
 #include "usrmotintf.h"		// usrmotInit(), usrmotReadEmcmotStatus(),
 				// etc.
@@ -1720,57 +1722,115 @@ int emcPositionSave() {
     unlink(posfile);
     FILE *f = fopen(posfile, "w");
     if(!f) return -1;
-    if (emcmotConfig.kinType == KINEMATICS_IDENTITY || emcmotConfig.kinType == KINEMATICS_BOTH) {
-        for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
-            int r = fprintf( f, "%.17f\n", emcmotStatus.joint_status[ axis_primary_joint[ joint_axis_index[i] ] ].pos_fb );
-            if(r < 0) { fclose(f); return -1; }
+    for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
+        int source_joint = i;
+        int axis = joint_axis_index[i];
+        if (i < TrajConfig.Joints && axis >= 0 && axis < EMCMOT_MAX_AXIS) {
+            int primary = axis_primary_joint[axis];
+            if (primary >= 0 && primary < TrajConfig.Joints && primary < EMCMOT_MAX_JOINTS) {
+                source_joint = primary;
+            }
         }
-    }
-    else {
-        for(int i=0; i<EMCMOT_MAX_JOINTS; i++) {
-            int r = fprintf(f, "%.17f\n", emcmotStatus.joint_status[i].pos_fb);
-            if(r < 0) { fclose(f); return -1; }
-        }
+        int r = fprintf(f, "%.17f\n", emcmotStatus.joint_status[source_joint].pos_fb);
+        if(r < 0) { fclose(f); return -1; }
     }
     fclose(f);
     return 0;
 }
 
 
-void find_axis_primary_joints(void)
+/* Use the module's coordinates, not TRAJ's axis list: only trivkins
+   guarantees that duplicate letters denote joints sharing a coordinate.
+   CommandCNC supplies module arguments in KINS/OPTIONS; standard LinuxCNC
+   configurations put them directly in KINS/KINEMATICS. */
+static bool find_trivkins_coordinates(IniFile &ini, std::string &coords)
+{
+    const char *value = ini.Find("KINEMATICS", "KINS");
+    std::istringstream kinematics(value ? value : "");
+    std::string token;
+    if (!(kinematics >> token) || token != "trivkins") {
+        return false;
+    }
+    while (kinematics >> token) {
+        if (token.compare(0, 12, "coordinates=") == 0) {
+            coords = token.substr(12);
+            return true;
+        }
+    }
+    value = ini.Find("OPTIONS", "KINS");
+    std::istringstream options(value ? value : "");
+    while (options >> token) {
+        if (token.compare(0, 12, "coordinates=") == 0) {
+            coords = token.substr(12);
+            return true;
+        }
+    }
+    coords = "XYZABCUVW"; // trivkins' default module parameter
+    return true;
+}
+
+int find_axis_primary_joints(void)
 {
     int   jno=0, a=0;
+    if (TrajConfig.Joints < 0 || TrajConfig.Joints > EMCMOT_MAX_JOINTS) {
+        return -1;
+    }
     IniFile ini;
     ini.Open(emc_inifile);
-    const char *coords = ini.Find("COORDINATES", "TRAJ");
+    std::string coordinates;
+    bool trivkins = find_trivkins_coordinates(ini, coordinates);
     ini.Close();
 
     // init all axis_idx_for_jno[] (-1 means unspecified)
     for(jno=0; jno<EMCMOT_MAX_JOINTS; jno++) { joint_axis_index[jno] = -1; }
     for(a=0; a<EMCMOT_MAX_AXIS; a++) { axis_primary_joint[a] = -1; }
 
-    if(!coords || !coords[0]) { coords = "XYZABCUVW"; }
+    const char *coords = coordinates.c_str();
     jno = 0; // begin: assign joint numbers at 0th coords position
     while (*coords) {
+        a = -1;
         switch(*coords) {
-          case 'x': case 'X': joint_axis_index[jno]= 0;jno++;break;
-          case 'y': case 'Y': joint_axis_index[jno]= 1;jno++;break;
-          case 'z': case 'Z': joint_axis_index[jno]= 2;jno++;break;
-          case 'a': case 'A': joint_axis_index[jno]= 3;jno++;break;
-          case 'b': case 'B': joint_axis_index[jno]= 4;jno++;break;
-          case 'c': case 'C': joint_axis_index[jno]= 5;jno++;break;
-          case 'u': case 'U': joint_axis_index[jno]= 6;jno++;break;
-          case 'v': case 'V': joint_axis_index[jno]= 7;jno++;break;
-          case 'w': case 'W': joint_axis_index[jno]= 8;jno++;break;
+          case 'x': case 'X': a=0;break;
+          case 'y': case 'Y': a=1;break;
+          case 'z': case 'Z': a=2;break;
+          case 'a': case 'A': a=3;break;
+          case 'b': case 'B': a=4;break;
+          case 'c': case 'C': a=5;break;
+          case 'u': case 'U': a=6;break;
+          case 'v': case 'V': a=7;break;
+          case 'w': case 'W': a=8;break;
+        }
+        if (a >= 0) {
+            if (jno >= EMCMOT_MAX_JOINTS) {
+                rcs_print_error("Too many trivkins coordinates (maximum %d)\n", EMCMOT_MAX_JOINTS);
+                return -1;
+            }
+            joint_axis_index[jno++] = a;
         }
         coords++; // next coordinates letter
     } // while
 
-    for (jno=0; jno < EMCMOT_MAX_JOINTS; jno++) {
-         if (axis_primary_joint[joint_axis_index[jno]] == -1) axis_primary_joint[joint_axis_index[jno]]=jno;
+    for (jno=0; jno < TrajConfig.Joints; jno++) {
+        int axis = joint_axis_index[jno];
+        if (axis >= 0 && axis < EMCMOT_MAX_AXIS && axis_primary_joint[axis] == -1) {
+            axis_primary_joint[axis] = jno;
+        }
     }
 
-} //map_coordinates_to_jnumbers()
+    for (jno=0; jno < TrajConfig.Joints; jno++) {
+        int axis = joint_axis_index[jno];
+        int primary = (trivkins && axis >= 0 && axis < EMCMOT_MAX_AXIS)
+            ? axis_primary_joint[axis] : jno;
+        emcmotCommand.command = EMCMOT_SET_JOINT_PRIMARY;
+        emcmotCommand.joint = jno;
+        emcmotCommand.primary_joint = primary;
+        if (usrmotWriteEmcmotCommand(&emcmotCommand) != 0) {
+            rcs_print_error("Failed to set primary joint for joint %d\n", jno);
+            return -1;
+        }
+    }
+    return 0;
+}
 
 
 // EMC_MOTION functions
@@ -1813,7 +1873,9 @@ int emcMotionInit()
 	    }
 	}
 
-    find_axis_primary_joints();
+    if (find_axis_primary_joints() != 0) {
+        return -1;
+    }
 
     // Ignore errors from emcPositionLoad(), because what are you going to do?
     (void)emcPositionLoad();

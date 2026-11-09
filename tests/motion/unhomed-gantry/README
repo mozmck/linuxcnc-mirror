@@ -1,0 +1,21 @@
+Unhomed gantry coordinate transitions and saved positions
+=======================================================
+
+Run with: bash tests/motion/unhomed-gantry/test.sh
+
+These tests compile the actual controller and task-interface sources with
+undefined-behavior/bounds checks. They require the LinuxCNC development
+headers/libraries, GCC and G++, but do not start LinuxCNC or realtime threads.
+
+The controller test checks joint-to-teleop/coordinated transitions and
+re-enabling with either mode already selected, with trivkins identity and
+both kinematics types. It verifies continuous motor commands and unchanged
+following error after a partial homing coordinate reset or independent joint
+movement, including nonzero motor offsets and backlash. Either side may have
+finished homing first; its established coordinate is retained. Homed, independent,
+and extra joints are excluded; moving/homing transitions are deferred.
+
+The position test uses the actual INI reader and save/load functions. It
+checks inline and OPTIONS coordinates, nonstandard joint order, a different
+TRAJ axis list, non-trivial kinematics, unused and extra joints, full-size
+and oversized mappings, command failures, and all 16 saved position slots.

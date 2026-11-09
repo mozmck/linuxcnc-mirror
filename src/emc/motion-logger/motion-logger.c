@@ -642,6 +642,10 @@ int main(int argc, char* argv[]) {
                 log_print("SET_JOINT_MOTOR_OFFSET\n");
                 break;
 
+            case EMCMOT_SET_JOINT_PRIMARY:
+                /* Startup mapping is used only by the realtime controller. */
+                break;
+
             case EMCMOT_SET_JOINT_COMP:
                 log_print("SET_JOINT_COMP\n");
                 break;

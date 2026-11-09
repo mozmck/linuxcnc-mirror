@@ -920,6 +920,7 @@ static int init_comm_buffers(void)
 
 	/* init the config fields with some "reasonable" defaults" */
 	joint->type = 0;
+	joint->primary_joint = joint_num;
 	joint->max_pos_limit = 1.0;
 	joint->min_pos_limit = -1.0;
 	joint->vel_limit = 1.0;

@@ -715,6 +715,15 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 	    joint->motor_offset = emcmotCommand->motor_offset;
 	    break;
 
+        case EMCMOT_SET_JOINT_PRIMARY:
+            if (joint == 0 || GET_MOTION_ENABLE_FLAG()
+                || emcmotCommand->primary_joint < 0
+                || emcmotCommand->primary_joint > joint_num) {
+                emcmotStatus->commandStatus = EMCMOT_COMMAND_INVALID_PARAMS;
+                break;
+            }
+            joint->primary_joint = emcmotCommand->primary_joint;
+            break;
 	case EMCMOT_SET_JOINT_POSITION_LIMITS:
 	    /* set the position limits for the joint */
 	    /* can be done at any time */

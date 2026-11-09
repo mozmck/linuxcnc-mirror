@@ -1,0 +1,2 @@
+11 gantry transitions preserve motor position and following error; exclusion checks passed
+position mapping, transport, save/load, unused joints and bounds checks passed
