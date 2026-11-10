@@ -33,6 +33,11 @@ configuration (to learn the revision), holds the THC off through
 thc.disable-out, reports fw.version-ok false and logs the mismatch; the
 firmware update bridge still works.
 
+A board that stays in its bootloader answers with frames only the bootloader
+sends.  The driver then holds the THC off the same way, sets
+fw.bootloader-active, and reads the bootloader's version into
+fw.bootloader-rev with a PING.
+
 CMD_DATA requests are 18 bytes:
   byte 0      control flags (above)
   byte 1      XY response scale, actual / programmed feed, 0..255
@@ -209,6 +214,8 @@ pin out s32 data.step-delta "Accumulated motor step delta from firmware";
 pin out u32 fw.app-rev "DTHC6 application firmware revision (FW_REV)";
 pin out u32 fw.required-rev "Firmware revision this driver speaks (FW_REV)";
 pin out bit fw.version-ok "The board runs the required firmware; otherwise the THC is held off";
+pin out bit fw.bootloader-active "The board is running its bootloader, not the application";
+pin out u32 fw.bootloader-rev "Bootloader version once it has answered PING (22 is 2.2), otherwise 0";
 
 /* ---- Status word and decoded bits ---- */
 pin out u32 status.code "Raw 32-bit firmware status word";
@@ -575,6 +582,15 @@ enum {
 /* The one firmware revision this driver speaks; the profile is version 8,
  * 71 bytes, in three pages. */
 #define DTHC_FW_REV                 30u
+/* The bootloader reuses two application opcodes, with reply lengths the
+ * application never sends: STATUS is opcode 14 (application PROFILE, 14 bytes
+ * or more) with 1 or 3 bytes, and PING is opcode 12 (application AUTOSETTINGS,
+ * 2 bytes) with 3.  An application that gets a PING treats it as a read of
+ * the Auto-Set tolerances. */
+#define DTHC_BTLDR_RSP_STATUS       DTHC_SPI_CMD_PROFILE
+#define DTHC_BTLDR_CMD_PING         DTHC_SPI_CMD_AUTOSETTINGS
+#define DTHC_PROFILE_REPLY_MIN      14u
+#define DTHC_DEVICE_CODE            25u
 #define DTHC_PROFILE_BYTES          71u
 #define DTHC_VAD_MODE_HOST          0u
 #define DTHC_VAD_MODE_FIRMWARE      1u
@@ -944,6 +960,27 @@ static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
             dthc_stream_voltage_sample(__comp_inst, first_tick + (uint32_t)i,
                 dthc_get_u16(payload + 20 + (i * 2)));
     }
+}
+
+/* Note which program answered.  Returns 1 for a frame only the bootloader
+ * sends; any other good frame came from the application. */
+static int dthc_track_bootloader(struct __comp_state *__comp_inst, uint8_t cmd,
+                                 const uint8_t *payload, uint8_t payload_len)
+{
+    int ping = (cmd == DTHC_BTLDR_CMD_PING) && (payload_len == 3u) &&
+               (payload[0] == DTHC_DEVICE_CODE);
+
+    if (!ping && !((cmd == DTHC_BTLDR_RSP_STATUS) &&
+                   (payload_len < DTHC_PROFILE_REPLY_MIN))) {
+        fw_bootloader_active = 0;
+        fw_bootloader_rev = 0;
+        return 0;
+    }
+
+    fw_bootloader_active = 1;
+    if (ping)
+        fw_bootloader_rev = ((uint32_t)payload[1] << 8) | payload[2];
+    return 1;
 }
 
 /* CMD_CONFIG reply payload layout (43 bytes):
@@ -1859,9 +1896,6 @@ static int dthc_bridge_read(struct __comp_state *__comp_inst)
     }
 
     frame_state = dthc_validate_frame(rx_frame, &cmd, &payload, &payload_len);
-    (void)cmd;
-    (void)payload;
-    (void)payload_len;
 
     if (frame_state != DTHC_FRAME_OK) {
         /*
@@ -1889,6 +1923,7 @@ static int dthc_bridge_read(struct __comp_state *__comp_inst)
         return 0;
     }
 
+    dthc_track_bootloader(__comp_inst, cmd, payload, payload_len);
     dthc_bridge_copy_to_volatile(shm->response_frame, rx_frame);
     shm->response_status = frame_state;
     shm->response_seq = bridge_inflight_seq;
@@ -2195,6 +2230,10 @@ static int write(void *subdata)
     } else {
         comm_online = 0;
     }
+    if (!comm_online) {
+        fw_bootloader_active = 0;
+        fw_bootloader_rev = 0;
+    }
 
     /* ---- Z-position (always, even offline) ---- */
     dthc_update_zpos(__comp_inst);
@@ -2308,7 +2347,10 @@ static int write(void *subdata)
         }
         if (pending_config_read) {
             pending_config_read = 0;
-            dthc_queue_frame(__comp_inst, DTHC_SPI_CMD_CONFIG, payload, 0u);
+            dthc_queue_frame(__comp_inst,
+                             (fw_bootloader_active && !fw_bootloader_rev) ?
+                                 DTHC_BTLDR_CMD_PING : DTHC_SPI_CMD_CONFIG,
+                             payload, 0u);
         } else {
             dthc_queue_frame(__comp_inst, 0u, payload, 0u);
         }
@@ -2379,6 +2421,13 @@ static int read(void *subdata)
     comm_last_rx_cmd = cmd;
     online_countdown = comm_online_timeout_cycles;
     comm_online = (online_countdown > 0) ? 1 : 0;
+
+    /* No application is running: the THC stays off until one answers. */
+    if (dthc_track_bootloader(__comp_inst, cmd, payload, payload_len)) {
+        fw_version_ok = 0;
+        fw_app_rev = 0;
+        return 0;
+    }
 
     switch (cmd) {
     case 0:
