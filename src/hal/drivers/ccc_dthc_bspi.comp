@@ -31,7 +31,10 @@ The driver speaks one firmware revision, DTHC_FW_REV (fw.required-rev).
 Until the board reports exactly that revision, it only reads the
 configuration (to learn the revision), holds the THC off through
 thc.disable-out, reports fw.version-ok false and logs the mismatch; the
-firmware update bridge still works.
+firmware update bridge still works.  Firmware 1.x, the only older
+revision in the field, answers the configuration read with the same layout
+minus the last byte, so fw.app-rev shows its revision and CommandCNC asks
+for the update.  Nothing else of 1.x is used.
 
 A board that stays in its bootloader answers with frames only the bootloader
 sends.  The driver then holds the THC off the same way, sets
@@ -92,16 +95,10 @@ pin in bit cmd.motor-up "Momentary DTHC6 internal-motor up command (bit 0)";
 pin in bit cmd.motor-down "Momentary DTHC6 internal-motor down command (bit 7)";
 pin in bit cmd.machine-is-on "Machine power interlock for internal-motor test";
 pin in bit cmd.use-enable-pin "Defer enable to hardware input pin (bit 6). Normally 1.";
-pin in bit cmd.reset-step-delta "One-shot: zero the firmware step-delta counter";
 pin in bit cmd.torch-off "Torch-off command (bit 3)";
-pin in bit cmd.do-autoset "One-shot autoset trigger (bit 5)";
 pin io bit cmd.enable-autoset "Continuous autoset enable (bit 4); writable so gcode-cmd S80/S89 can update it";
 
-/* ---- One-shot config commands ---- */
-pin in bit cmd.request-config "One-shot: request the full configuration frame from firmware";
-pin in bit cmd.write-thc-config "One-shot: write cfg.thc.* to firmware";
-pin in bit cmd.write-motor-config "One-shot: write cfg.motor.* to firmware";
-pin in bit cmd.write-autosettings "One-shot: write cfg.autoset.* and read back applied values";
+/* ---- Commissioning (dthc6_commission) ---- */
 pin in bit cmd.request-control-profile "One-shot: read the versioned observer control profile";
 pin in bit cmd.write-control-profile "One-shot: stage, CRC-check and commit cfg.control.* while torch off and program idle";
 
@@ -150,7 +147,6 @@ pin out bit fb.profile.provisional;
 pin out bit fb.profile.fault;
 pin out u32 fb.profile.generation;
 pin out u32 fb.profile.crc;
-pin out u32 fb.profile.length;
 pin out u32 fb.profile.last-status "0 success; 1 request; 2 torch; 3 validation; 4 CRC readback; 5 host interlock abort";
 pin out u32 fb.profile.read-sequence "Increments after a complete CRC-checked profile readback";
 
@@ -167,18 +163,9 @@ pin in u32 cfg.thc.pgain "P gain";
 pin in u32 cfg.thc.igain "I gain";
 pin in u32 cfg.thc.dgain "D gain";
 
-/* ---- THC tuning readback from firmware ---- */
-pin out float fb.thc.deadband;
+/* ---- THC readback from firmware.  The set point and delay come back
+ * through their cfg.thc.* io pins. ---- */
 pin out s32 fb.thc.response-trim;
-pin out float fb.thc.delay;
-pin out u32 fb.thc.set-point;
-pin out u32 fb.thc.upper-limit;
-pin out u32 fb.thc.lower-limit;
-pin out u32 fb.thc.arcok-current;
-pin out u32 fb.thc.minvel;
-pin out u32 fb.thc.pgain;
-pin out u32 fb.thc.igain;
-pin out u32 fb.thc.dgain;
 
 /* ---- Motor / Z-axis parameters ---- */
 pin in u32 cfg.motor.steps-per-unit;
@@ -189,26 +176,18 @@ pin in bit cfg.motor.dir-up-polarity "DTHC5-compatible MOTOR_REVERSE setting";
 pin in bit cfg.motor.step-polarity "DTHC5-compatible MOTOR_STEP_LOW setting (1 = active-low motor output)";
 pin in bit cfg.motor.metric-units;
 
-pin out u32 fb.motor.steps-per-unit;
+/* The Z limits the firmware runs with (THC Settings shows them). */
 pin out u32 fb.motor.max-up-velocity;
 pin out u32 fb.motor.max-down-velocity;
 pin out u32 fb.motor.acceleration;
-pin out bit fb.motor.dir-up-polarity;
-pin out bit fb.motor.step-polarity;
-pin out bit fb.motor.metric-units;
 
-/* ---- Autoset parameters ---- */
+/* ---- Autoset parameters (read back from the firmware) ---- */
 pin io float cfg.autoset.upper-tol "Autoset upper tolerance in volts";
 pin io float cfg.autoset.lower-tol "Autoset lower tolerance in volts";
-
-pin out float fb.autoset.upper-tol;
-pin out float fb.autoset.lower-tol;
 
 /* ---- Live data from firmware ---- */
 pin out u32 data.tip-volts "Measured arc voltage in volts";
 pin out u32 data.current "Measured arc current";
-pin out float data.tip-volts-precise "Measured arc voltage with Q4 precision";
-pin out float data.current-precise "Measured arc current with Q4 precision";
 pin out u32 data.target-volts "Active target voltage";
 pin out s32 data.step-delta "Accumulated motor step delta from firmware";
 pin out u32 fw.app-rev "DTHC6 application firmware revision (FW_REV)";
@@ -217,38 +196,24 @@ pin out bit fw.version-ok "The board runs the required firmware; otherwise the T
 pin out bit fw.bootloader-active "The board is running its bootloader, not the application";
 pin out u32 fw.bootloader-rev "Bootloader version once it has answered PING (22 is 2.2), otherwise 0";
 
-/* ---- Status word and decoded bits ---- */
-pin out u32 status.code "Raw 32-bit firmware status word";
+/* ---- Decoded firmware status bits.  The DTHC4/5 bits the DTHC6 never
+ * sets (tipsaver, motor voltage, Gecko fault, watchdog, debug) and those
+ * nothing reads (settings flash, test mode, has-autoset) have no pins. ---- */
 pin out bit status.fault;
 pin out bit status.delay;
-pin out bit status.tipsave-active;
 pin out bit status.enabled;
-pin out bit status.tipsave-on;
-pin out bit status.eeread-err;
-pin out bit status.eewrite-err;
 pin out bit status.arcok-on;
-pin out bit status.mtrvolt-high;
-pin out bit status.mtrvolt-low;
-pin out bit status.mtrvolt-off;
-pin out bit status.gecko-fault;
-pin out bit status.eegood;
 pin out bit status.torch-on;
 pin out bit status.hold;
 pin out bit status.up;
 pin out bit status.down;
 pin out bit status.mtr-external "Firmware has handed Z control back to LinuxCNC";
-pin out bit status.test-mode;
-pin out bit status.wd-good;
 pin out bit status.as-sample-good;
 pin out bit status.as-sample-bad;
-pin out bit status.has-autoset "Firmware supports autoset feature";
-pin out bit status.debug;
-pin out bit status.profile-provisional;
 pin out bit status.velocity-stale;
 pin out bit status.observer-active;
 pin out bit status.target-active;
 pin out bit status.slowdown-active;
-pin out bit status.profile-fault;
 pin out bit status.down-lock;
 pin out u32 status.vad-mode "Speed-hold mode the firmware applies (trace)";
 pin out bit status.vad-hold "Firmware holds Z for XY speed now";
@@ -276,27 +241,14 @@ pin out bit trace.kerf-armed "Auto: kerf guard armed (after the startup correcti
 pin out bit trace.kerf-recovering "Auto: downward authority returning after a hold";
 pin out bit trace.kerf-ramp "Auto: a steady, plate-like rise is building while held";
 pin out float trace.kerf-release "Auto: release qualification progress, 0-1";
-pin out bit trace.target-cutoff "Point 9 policy holds the THC now (the real hold with firmware VAD)";
-pin out bit trace.target-uncalibrated "Point 9: the process's C is not calibrated yet";
-pin out bit trace.model-cutoff "Point 9: the model's own cutoff would hold";
-pin out bit trace.hold-vad "Firmware hold: XY below VAD percent";
-pin out bit trace.hold-model "Firmware hold: below the point-9 model's cutoff (Auto VAD)";
-pin out bit trace.hold-stale "Firmware hold: XY speed stale or invalid";
-pin out bit trace.model-target "Auto VAD runs on the model with its offset applied";
+pin out bit trace.target-cutoff "Point 9 policy holds the THC now (the real hold with firmware VAD); trace.reason bit 0x0200";
 pin out float trace.learn-c "Point-9 C the model uses now, volts";
 pin out u32 trace.learn-count "Learned slowdowns of the C in use (0 = feed law)";
-pin out u32 trace.learn-status "Raw learner status: bits 0-3 flags, last result << 8";
-pin out bit trace.learn-learned "The model uses a learned C";
-pin out bit trace.learn-calibrated "The C in use is calibrated (two estimates in a row agreeing with the pool)";
-pin out bit trace.learn-scaled "The C in use is borrowed from a nearby feed";
-pin out bit trace.learn-store-due "Learned table not yet saved to flash";
+pin out u32 trace.learn-status "Learner status: 0x01 learned, 0x02 calibrated, 0x04 table not yet stored, 0x08 scaled from a nearby feed; last result << 8";
 pin out u32 trace.learn-last-result "Last slowdown: 1 accepted, 2 short, 3 kerf, 4 Z, 5 timeout, 6 noise, 7 residual, 8 uncertain, 9 range, 10 interrupted, 11 held, 12 reset, 13 plate slope";
 pin out float trace.learn-last-c "Last slowdown's fitted C, volts";
 pin out u32 trace.learn-accepts "Slowdowns learned since power-up";
 pin out u32 trace.learn-rejects "Slowdowns rejected since power-up";
-pin out u32 trace.learn-solve-us "Longest learner solve step, us";
-pin out u32 trace.learn-stores "Learned-table flash records written";
-pin out bit trace.learn-store-failed "A learned-table flash write failed";
 pin out u32 trace.learn-z-skips "Slowdowns skipped because Z moved";
 pin out float trace.slope "Learned surface slope (rise/run) at actual XY speed";
 /* Trace diagnostic slot, refreshed in turn. */
@@ -350,8 +302,6 @@ pin out u32 logging.stream-overruns "Samples dropped because the userspace strea
 pin in float thc.zpos-in "Z position input from LinuxCNC (halui.axis.z.pos-relative)";
 pin out float thc.zpos-out "Adjusted Z position output (connect to Z DRO / joint fb)";
 pin out float thc.zpos-final "Z offset captured when firmware hands back Z control";
-pin out bit thc.zcntrl-int "True when firmware is controlling Z (STAT_MTR_EXTERNAL == 0)";
-pin in bit thc.zsync-done "LinuxCNC signals it has handled the Z sync (currently unused)";
 pin out bit thc.zsync-ready "True for 2 cycles when firmware returns Z to external control";
 
 /* ---- Gcode command input (connect to motion.analog-out-00) ---- */
@@ -388,25 +338,17 @@ pin io u32 thc.air-pressure "Requested plasma air pressure to/from UI";
 
 /* ---- Communication diagnostics ---- */
 pin out bit comm.online "True while valid frames are still arriving";
-pin out bit comm.config-valid "True after at least one valid config reply";
-pin out bit comm.autosettings-valid "True after at least one valid autosettings reply";
-pin out u32 comm.last-tx-cmd;
-pin out u32 comm.last-rx-cmd;
 pin out u32 comm.good-frames;
 pin out u32 comm.bad-frames;
 pin out u32 comm.bad-sof;
 pin out u32 comm.bad-crc;
 pin out u32 comm.bad-length;
-pin out u32 comm.unexpected-cmd;
 
 /* ---- Firmware update bridge ---- */
 pin in bit update.enable "Suspend runtime traffic and expose raw BSPI bridge";
-pin out bit update.active "True while runtime traffic is suspended for update";
 pin out bit update.bridge-ready "True when userspace may exchange raw 48-byte frames";
 pin out u32 update.state "Firmware update state: 0 RUN, 1 QUIESCING, 2 BRIDGE_READY, 3 BRIDGE_BUSY, 4 RESTORING, 5 FAULT";
 pin out s32 update.error-code "Firmware update bridge error: 0 none, 1 FIFO clear, 2 shmem, 3 overrun, 4 transfer, 5 aborted";
-
-param rw u32 comm.online-timeout-cycles = 100 "Servo cycles to keep comm.online after last good frame";
 
 option extra_setup yes;
 option extra_cleanup yes;
@@ -445,14 +387,15 @@ variable unsigned online_countdown;
 variable unsigned motor_test_armed;
 
 /* ---- One-shot edge detection for cmd.* pins ---- */
-variable unsigned prev_reset_step_delta;
-variable unsigned prev_do_autoset;
-variable unsigned prev_request_config;
-variable unsigned prev_write_thc_config;
-variable unsigned prev_write_motor_config;
-variable unsigned prev_write_autosettings;
 variable unsigned prev_request_control_profile;
 variable unsigned prev_write_control_profile;
+
+/* ---- Firmware configuration readback without pins ---- */
+variable unsigned config_valid;
+variable unsigned fw_steps_per_unit;
+variable unsigned fw_dir_up_polarity;
+variable unsigned fw_step_polarity;
+variable unsigned fw_metric_units;
 
 /* ---- Z-axis tracking state ---- */
 variable unsigned prev_mtr_external;
@@ -508,6 +451,8 @@ include <string.h>;
 #define DTHC_SPI_TRAM_SLOTS   (DTHC_SPI_PACKET_SIZE / 4)
 #define DTHC_SPI_PAYLOAD_MAX  44
 #define DTHC_SPI_BSPI_CHANNEL 0
+/* Servo cycles comm.online stays true after the last good frame. */
+#define DTHC_ONLINE_TIMEOUT_CYCLES 100u
 
 #define DTHC_SPI_SOF          0x55u
 
@@ -840,40 +785,24 @@ static int dthc_validate_frame(const uint8_t *frame, uint8_t *cmd,
  * ================================================================ */
 static void dthc_apply_status(struct __comp_state *__comp_inst, uint32_t status)
 {
-    status_code = status;
     status_fault          = (status & DTHC_STAT_FAULT)          ? 1 : 0;
     status_delay          = (status & DTHC_STAT_DELAY)          ? 1 : 0;
-    status_tipsave_active = (status & DTHC_STAT_TIPSAVE_ACT)    ? 1 : 0;
     status_enabled        = (status & DTHC_STAT_ENABLED)        ? 1 : 0;
-    status_tipsave_on     = (status & DTHC_STAT_TIPSAVE_ON)     ? 1 : 0;
-    status_eeread_err     = (status & DTHC_STAT_EEREAD_ERR)     ? 1 : 0;
-    status_eewrite_err    = (status & DTHC_STAT_EEWRITE_ERR)    ? 1 : 0;
     status_arcok_on       = (status & DTHC_STAT_ARCOK_ON)       ? 1 : 0;
-    status_mtrvolt_high   = (status & DTHC_STAT_MTRVOLT_HIGH)   ? 1 : 0;
-    status_mtrvolt_low    = (status & DTHC_STAT_MTRVOLT_LOW)    ? 1 : 0;
-    status_mtrvolt_off    = (status & DTHC_STAT_MTRVOLT_OFF)    ? 1 : 0;
-    status_gecko_fault    = (status & DTHC_STAT_GECKO_FAULT)    ? 1 : 0;
-    status_eegood         = (status & DTHC_STAT_EEGOOD)         ? 1 : 0;
     status_torch_on       = (status & DTHC_STAT_TORCH_ON)       ? 1 : 0;
     status_hold           = (status & DTHC_STAT_HOLD)           ? 1 : 0;
     status_up             = (status & DTHC_STAT_UP)             ? 1 : 0;
     status_down           = (status & DTHC_STAT_DOWN)           ? 1 : 0;
     status_mtr_external   = (status & DTHC_STAT_MTR_EXTERNAL)   ? 1 : 0;
-    status_test_mode      = (status & DTHC_STAT_TEST_MODE)      ? 1 : 0;
-    status_wd_good        = (status & DTHC_STAT_WD_GOOD)        ? 1 : 0;
     status_as_sample_good = (status & DTHC_STAT_AS_SAMPLE_GOOD) ? 1 : 0;
     status_as_sample_bad  = (status & DTHC_STAT_AS_SAMPLE_BAD)  ? 1 : 0;
-    status_profile_provisional = (status & DTHC_STAT_PROFILE_PROV) ? 1 : 0;
     status_velocity_stale = (status & DTHC_STAT_VELOCITY_STALE) ? 1 : 0;
     status_observer_active = (status & DTHC_STAT_OBSERVER_ACTIVE) ? 1 : 0;
     status_target_active = (status & DTHC_STAT_TARGET_ACTIVE) ? 1 : 0;
     status_slowdown_active = (status & DTHC_STAT_SLOWDOWN_ACTIVE) ? 1 : 0;
-    status_profile_fault = (status & DTHC_STAT_PROFILE_FAULT) ? 1 : 0;
     status_down_lock = (status & DTHC_STAT_DOWN_LOCK) ? 1 : 0;
-    status_has_autoset    = (status & DTHC_STAT_HAS_AUTOSET)    ? 1 : 0;
-    status_debug          = (status & DTHC_STAT_DEBUG)          ? 1 : 0;
-    fb_profile_provisional = status_profile_provisional;
-    fb_profile_fault = status_profile_fault;
+    fb_profile_provisional = (status & DTHC_STAT_PROFILE_PROV) ? 1 : 0;
+    fb_profile_fault = (status & DTHC_STAT_PROFILE_FAULT) ? 1 : 0;
 }
 
 /* ================================================================
@@ -942,8 +871,6 @@ static void dthc_parse_data_reply(struct __comp_state *__comp_inst,
     current_raw = dthc_get_u16(payload + 2);
     data_tip_volts   = tip_raw / 16;
     data_current     = current_raw / 16;
-    data_tip_volts_precise = (double)tip_raw / 16.0;
-    data_current_precise = (double)current_raw / 16.0;
     data_step_delta  = (int32_t)dthc_get_u32(payload + 8);
     data_target_volts= dthc_get_u16(payload + 12) / 16;
     dthc_apply_status(__comp_inst, dthc_get_u32(payload + 4));
@@ -1003,11 +930,16 @@ static int dthc_track_bootloader(struct __comp_state *__comp_inst, uint8_t cmd,
  *   [34..37] max_down_velocity (u32)
  *   [38..41] FW_REV            (u32)
  *   [42]     response trim     (s8)
+ *
+ * Firmware 1.x sends the same layout without the response trim, 42 bytes,
+ * so its revision reads here and the update prompt names it.
  */
+#define DTHC_CONFIG_REPLY_REV_END   42u
+#define DTHC_CONFIG_REPLY_BYTES     43u
 static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
                                     const uint8_t *payload, uint8_t payload_len)
 {
-    if (payload_len < 43) {
+    if (payload_len < DTHC_CONFIG_REPLY_REV_END) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
@@ -1026,32 +958,26 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     }
     fw_version_ok = (fw_app_rev == DTHC_FW_REV) ? 1 : 0;
     fw_required_rev = DTHC_FW_REV;
-    comm_config_valid = 1;
     if (!fw_version_ok)
         return;
-
-    fb_thc_deadband      = (double)payload[0]                / 16.0;
-    fb_thc_delay         = (double)dthc_get_u16(payload + 1) / 1000.0;
-    fb_thc_set_point     = dthc_get_u16(payload + 3) / 16;
-    fb_thc_upper_limit   = dthc_get_u16(payload + 5) / 16;
-    fb_thc_lower_limit   = dthc_get_u16(payload + 7) / 16;
-    fb_thc_arcok_current = dthc_get_u16(payload + 9) / 16;
-    fb_thc_minvel        = dthc_get_u16(payload + 11);
-    fb_thc_pgain         = dthc_get_u16(payload + 13);
-    fb_thc_igain         = dthc_get_u16(payload + 15);
-    fb_thc_dgain         = dthc_get_u16(payload + 17);
+    if (payload_len < DTHC_CONFIG_REPLY_BYTES) {
+        comm_bad_length++;
+        comm_bad_frames++;
+        return;
+    }
+    config_valid = 1;
 
     /* Echo writable cfg pins back from firmware so the GUI sees the
      * initial values on startup (mirrors c3_main HAL_IO pin behaviour). */
-    cfg_thc_set_point = fb_thc_set_point;
-    cfg_thc_delay     = fb_thc_delay;
+    cfg_thc_set_point = dthc_get_u16(payload + 3) / 16;
+    cfg_thc_delay     = (double)dthc_get_u16(payload + 1) / 1000.0;
 
-    fb_motor_steps_per_unit   = dthc_get_u32(payload + 19);
+    fw_steps_per_unit         = dthc_get_u32(payload + 19);
     fb_motor_max_up_velocity  = dthc_get_u32(payload + 23);
     fb_motor_acceleration     = dthc_get_u32(payload + 27);
-    fb_motor_dir_up_polarity  = payload[31] ? 1 : 0;
-    fb_motor_step_polarity    = payload[32] ? 1 : 0;
-    fb_motor_metric_units     = payload[33] ? 1 : 0;
+    fw_dir_up_polarity        = payload[31] ? 1 : 0;
+    fw_step_polarity          = payload[32] ? 1 : 0;
+    fw_metric_units           = payload[33] ? 1 : 0;
     fb_motor_max_down_velocity= dthc_get_u32(payload + 34);
     fb_thc_response_trim = (int8_t)payload[42];
     if (!profile_request_started) {
@@ -1066,13 +992,13 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
      * contains the INI-backed settings that CommandCNC wants.  Send the
      * complete motor configuration only when at least one field differs,
      * then request another config reply to verify it (handled by write()). */
-    if ((fb_motor_steps_per_unit    != cfg_motor_steps_per_unit) ||
+    if ((fw_steps_per_unit          != cfg_motor_steps_per_unit) ||
         (fb_motor_max_up_velocity   != cfg_motor_max_up_velocity) ||
         (fb_motor_max_down_velocity != cfg_motor_max_down_velocity) ||
         (fb_motor_acceleration      != cfg_motor_acceleration) ||
-        (fb_motor_dir_up_polarity   != (cfg_motor_dir_up_polarity ? 1 : 0)) ||
-        (fb_motor_step_polarity     != (cfg_motor_step_polarity ? 1 : 0)) ||
-        (fb_motor_metric_units      != (cfg_motor_metric_units ? 1 : 0))) {
+        (fw_dir_up_polarity         != (cfg_motor_dir_up_polarity ? 1u : 0u)) ||
+        (fw_step_polarity           != (cfg_motor_step_polarity ? 1u : 0u)) ||
+        (fw_metric_units            != (cfg_motor_metric_units ? 1u : 0u))) {
         pending_motor_config_write = 1;
     }
 }
@@ -1086,14 +1012,10 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
         comm_bad_frames++;
         return;
     }
-    fb_autoset_upper_tol = (double)payload[0] / 16.0;
-    fb_autoset_lower_tol = (double)payload[1] / 16.0;
-    comm_autosettings_valid = 1;
-
     /* Echo writable cfg pins back from firmware so the GUI sees the
      * confirmed values on startup. */
-    cfg_autoset_upper_tol = fb_autoset_upper_tol;
-    cfg_autoset_lower_tol = fb_autoset_lower_tol;
+    cfg_autoset_upper_tol = (double)payload[0] / 16.0;
+    cfg_autoset_lower_tol = (double)payload[1] / 16.0;
 }
 
 /* Profile version 8, 71 bytes, big-endian (thc_profile_serialize()):
@@ -1150,7 +1072,6 @@ static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
     cfg_control_brake_accel_fraction = (double)profile_bytes[69] / 256.0;
     cfg_control_auto_flags = profile_bytes[70];
     fb_profile_generation = dthc_get_u32(profile_bytes + 0);
-    fb_profile_length = DTHC_PROFILE_BYTES;
     fb_profile_valid = 1;
     fb_profile_read_sequence++;
 }
@@ -1240,7 +1161,6 @@ static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
     fb_profile_last_status = status;
     fb_profile_generation = dthc_get_u32(payload + 5);
     fb_profile_crc = dthc_get_u32(payload + 9);
-    fb_profile_length = total;
     count = payload[13];
 
     if ((total != DTHC_PROFILE_BYTES) || status != 0u) {
@@ -1333,12 +1253,6 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
     trace_realized_mm_s = (double)dthc_get_s24(payload + 38) / 1000.0;
     trace_kerf_hold = (trace_reason & 0x0100u) ? 1 : 0;
     trace_target_cutoff = (trace_reason & 0x0200u) ? 1 : 0;
-    trace_target_uncalibrated = (trace_reason & 0x0400u) ? 1 : 0;
-    trace_model_cutoff = (trace_reason & 0x0800u) ? 1 : 0;
-    trace_hold_vad = (trace_reason & 0x1000u) ? 1 : 0;
-    trace_hold_model = (trace_reason & 0x2000u) ? 1 : 0;
-    trace_hold_stale = (trace_reason & 0x4000u) ? 1 : 0;
-    trace_model_target = (trace_reason & 0x8000u) ? 1 : 0;
     status_vad_mode = (trace_mode_flags >> 5) & 3u;
     status_vad_hold = (trace_mode_flags & 0x80u) ? 1 : 0;
     {
@@ -1384,20 +1298,13 @@ static void dthc_parse_trace_reply(struct __comp_state *__comp_inst,
         case 31: trace_learn_count = value; break;
         case 32:
             trace_learn_status = value;
-            trace_learn_learned = (value & 0x01u) ? 1 : 0;
-            trace_learn_calibrated = (value & 0x02u) ? 1 : 0;
-            trace_learn_store_due = (value & 0x04u) ? 1 : 0;
-            trace_learn_scaled = (value & 0x08u) ? 1 : 0;
             trace_learn_last_result = value >> 8;
             break;
         case 33: trace_learn_last_c = (double)value / 1000.0; break;
         case 34: trace_learn_accepts = value; break;
         case 35: trace_learn_rejects = value; break;
-        case 36: trace_learn_solve_us = value; break;
-        case 37:
-            trace_learn_stores = value & 0x7fffu;
-            trace_learn_store_failed = (value & 0x8000u) ? 1 : 0;
-            break;
+        case 36: break; /* learner solve time; firmware timing checks only */
+        case 37: break; /* learned-table flash stores */
         case 38: trace_learn_z_skips = value; break;
         case 39: trace_kerf_threshold_mm = (double)value / 1000.0; break;
         case 40: trace_kerf_excess_mm = (double)(int16_t)value / 1000.0; break;
@@ -1672,7 +1579,6 @@ static void dthc_queue_frame(struct __comp_state *__comp_inst, uint8_t cmd,
 {
     dthc_build_frame(tx_frame, cmd, payload, payload_len);
     dthc_frame_to_tram(__comp_inst, tx_frame);
-    comm_last_tx_cmd = cmd;
 }
 
 /* ================================================================
@@ -1714,7 +1620,6 @@ static void dthc_bridge_publish(struct __comp_state *__comp_inst)
 {
     dthc_bspi_bridge_shm_t *shm = dthc_bridge_shm(__comp_inst);
 
-    update_active = (update_state != DTHC_UPDATE_RUN) ? 1 : 0;
     update_bridge_ready = (update_state == DTHC_UPDATE_BRIDGE_READY) ? 1 : 0;
 
     if (shm) {
@@ -1729,7 +1634,6 @@ static void dthc_bridge_zero_tram(struct __comp_state *__comp_inst)
     for (i = 0; i < DTHC_SPI_PACKET_SIZE; i++)
         tx_frame[i] = 0;
     dthc_frame_to_tram(__comp_inst, tx_frame);
-    comm_last_tx_cmd = 0;
 }
 
 static void dthc_bridge_reset_exchange(struct __comp_state *__comp_inst)
@@ -1811,7 +1715,6 @@ static void dthc_bridge_restore(struct __comp_state *__comp_inst)
         update_state = DTHC_UPDATE_FAULT;
     } else {
         update_state = DTHC_UPDATE_RUN;
-        update_active = 0;
         update_bridge_ready = 0;
     }
     dthc_bridge_publish(__comp_inst);
@@ -1863,7 +1766,6 @@ static int dthc_bridge_write(struct __comp_state *__comp_inst)
     if (req_seq != resp_seq) {
         dthc_bridge_copy_from_volatile(tx_frame, shm->request_frame);
         dthc_frame_to_tram(__comp_inst, tx_frame);
-        comm_last_tx_cmd = tx_frame[2];
         bridge_inflight = 1;
         bridge_discard_next_read = 1;
         bridge_inflight_seq = req_seq;
@@ -1941,16 +1843,14 @@ static int dthc_bridge_read(struct __comp_state *__comp_inst)
  * ================================================================ */
 static void dthc_update_zpos(struct __comp_state *__comp_inst)
 {
-    double spu = (fb_motor_steps_per_unit > 0)
-                 ? (double)fb_motor_steps_per_unit : 1.0;
+    double spu = (fw_steps_per_unit > 0)
+                 ? (double)fw_steps_per_unit : 1.0;
 
     if (!status_mtr_external) {
         /* Firmware is controlling Z via its internal stepper */
-        thc_zcntrl_int = 1;
         thc_zpos_out   = thc_zpos_in + ((double)data_step_delta / spu);
     } else {
         /* LinuxCNC is controlling Z */
-        thc_zcntrl_int = 0;
         thc_zpos_out   = thc_zpos_in;
     }
 
@@ -2194,7 +2094,7 @@ static void dthc_check_autosettings(struct __comp_state *__comp_inst)
     }
     /* The response trim travels with the THC config; send it whenever the
      * panel changes it, once the firmware is known to be the right one. */
-    if (comm_config_valid && fw_version_ok &&
+    if (config_valid && fw_version_ok &&
         (cfg_thc_response_trim != prev_response_trim)) {
         prev_response_trim = cfg_thc_response_trim;
         pending_thc_config_write = 1;
@@ -2223,13 +2123,9 @@ static int write(void *subdata)
     }
 
     /* Online countdown */
-    if (comm_online_timeout_cycles > 0) {
-        if (online_countdown > 0)
-            online_countdown--;
-        comm_online = (online_countdown > 0) ? 1 : 0;
-    } else {
-        comm_online = 0;
-    }
+    if (online_countdown > 0)
+        online_countdown--;
+    comm_online = (online_countdown > 0) ? 1 : 0;
     if (!comm_online) {
         fw_bootloader_active = 0;
         fw_bootloader_rev = 0;
@@ -2259,31 +2155,7 @@ static int write(void *subdata)
     /* ---- Autosettings tolerance change ---- */
     dthc_check_autosettings(__comp_inst);
 
-    /* ---- Edge-detect one-shot cmd.* pins ---- */
-    if (cmd_reset_step_delta && !prev_reset_step_delta)
-        pending_reset_step_delta = 1;
-    prev_reset_step_delta = cmd_reset_step_delta ? 1 : 0;
-
-    if (cmd_do_autoset && !prev_do_autoset)
-        pending_do_autoset = 1;
-    prev_do_autoset = cmd_do_autoset ? 1 : 0;
-
-    if (cmd_request_config && !prev_request_config)
-        pending_config_read = 1;
-    prev_request_config = cmd_request_config ? 1 : 0;
-
-    if (cmd_write_thc_config && !prev_write_thc_config)
-        pending_thc_config_write = 1;
-    prev_write_thc_config = cmd_write_thc_config ? 1 : 0;
-
-    if (cmd_write_motor_config && !prev_write_motor_config)
-        pending_motor_config_write = 1;
-    prev_write_motor_config = cmd_write_motor_config ? 1 : 0;
-
-    if (cmd_write_autosettings && !prev_write_autosettings)
-        pending_autosettings_write = 1;
-    prev_write_autosettings = cmd_write_autosettings ? 1 : 0;
-
+    /* ---- Edge-detect the commissioning one-shots ---- */
     if (cmd_request_control_profile && !prev_request_control_profile &&
         fw_version_ok) {
         profile_action = DTHC_PROFILE_READ;
@@ -2418,9 +2290,8 @@ static int read(void *subdata)
     }
 
     comm_good_frames++;
-    comm_last_rx_cmd = cmd;
-    online_countdown = comm_online_timeout_cycles;
-    comm_online = (online_countdown > 0) ? 1 : 0;
+    online_countdown = DTHC_ONLINE_TIMEOUT_CYCLES;
+    comm_online = 1;
 
     /* No application is running: the THC stays off until one answers. */
     if (dthc_track_bootloader(__comp_inst, cmd, payload, payload_len)) {
@@ -2448,7 +2319,6 @@ static int read(void *subdata)
         dthc_parse_trace_reply(__comp_inst, payload, payload_len);
         break;
     default:
-        comm_unexpected_cmd++;
         break;
     }
 
