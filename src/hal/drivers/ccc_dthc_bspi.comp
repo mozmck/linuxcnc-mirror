@@ -1393,7 +1393,10 @@ static void dthc_update_auto_delay(struct __comp_state *__comp_inst)
 {
     unsigned vad_en  = thc_vad_enabled ? 1 : 0;
     int      vad_pct = thc_vad_percent;
-    double   accel   = thc_xy_accel;
+    /* Normalize machine units/sec^2 to inches/sec^2 for the 350 ipm
+     * reference below. Comparing the normalized value also detects a
+     * change to cfg.motor.metric-units. */
+    double   accel   = thc_xy_accel / (cfg_motor_metric_units ? 25.4 : 1.0);
 
     if (vad_en  == prev_vad_enabled &&
         vad_pct == prev_vad_percent  &&
