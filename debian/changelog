@@ -1,4 +1,86 @@
-linuxcnc (1:2.9.2) UNRELEASED; urgency=medium
+linuxcnc (1:2.9.2~ccc3.0) unstable; urgency=medium
+
+  * Added ccc_dthc_bspi.comp for dthc using bspi
+
+ -- Moses McKnight <moses@candcnc.com>  Tue, 28 Jul 2026 22:21:11 -0500
+
+linuxcnc (1:2.9.2~ccc2.9) unstable; urgency=medium
+
+  * Added laserpwr comp to vary power with xy velocity
+
+ -- Moses McKnight <moses@candcnc.com>  Wed, 04 Feb 2026 16:13:03 -0600
+
+linuxcnc (1:2.9.2~ccc2.8) unstable; urgency=low
+
+  * Limit override fix for teleop mode
+  * Gscreen: MSG pops up dialog instead of notify in statusbar
+  * New candcnchoming.comp to properly handle gantry homing
+  * Improvment to position.txt file for gantry setups
+  * Gremlin: load colors from external file specified in INI file.
+  * Gremlin: added cross-hair tool
+  * Fix for SRFL to compile
+  * Improve error reporting for CommandCNC
+  * Add simple-run-from-line command, which simply starts at line given
+  * add Linuxmint-21+ to debian/configure
+  * Update linuxcnc.install.in for halui2
+  * Fix halui2 to actually build and run
+  * Add support for CandCNC EBOB-01
+  * Added dual_probe.comp, oxyfuel.comp, and thcenable.comp
+  * Added gremlin-file-loaded signal to HAL_Gremlin
+  * Added halui2.cc which is a fork of halui to add jogging features
+  * docs: 2.9.2 to 2.9.y
+  * docs: Typo, 2.9.1 -> 2.9.2
+  * gmoccapy: fix setting of keyboard size only in window mode
+  * qtvcp -cam_align panel: add ability to set X and Y camera scaling
+  * qtvcp -camview: - add ability to fix aspect ratio distrortion
+  * qtdragon_hd -fix macro button layout so they show properly
+  * qtdragon -fix macro button layout so button show properly
+  * qtvcp -add a very useful pyqt HAL signal
+  * qtvcp -aux_program _loader -use python3 to load gcode ripper
+  * Merge pull request #2819 from zz912/patch-23
+  * Update gmoccapy_postgui.hal
+  * Merge branch '2.8'
+  * gmoccapy: button "run from line" was always displayed as inactive
+  * Merge pull request #2813 from hansu/gmoccapy-3_4_7
+  * docs: fix missing linebreak in panelui.adoc
+  * gmoccapy: button "run from line" was always displayed as inactive
+  * gmoccapy: add setting for smaller keyboard width
+  * gmoccapy: fix box_dro_side is displayed in G-code editor (#2627)
+  * gmoccapy: update changelog
+  * gmoccapy: fix error when audio is not available
+  * gmoccapy: fix window size increase on edit button
+  * Merge pull request #2811 from
+      hansu/gmoccapy-add-sourceview-theme-setting
+  * gtksourceview: apply selection color from theme
+  * gmoccapy: add setting for G-code theme (GtkSourceView)
+  * gmoccapy: change debug level to '0' in sample config
+  * Merge pull request #2807 from havardAasen/impossible-nulls
+  * qtdragon_hd -update version
+  * Merge pull request #2809 from smoe/docs_pointer_to_apt_builddep
+  * docs: Extra verbosity, simplifications in example command lines
+  * docs: Pointer to apt-get build-dep
+  * Fixes another address that can't be NULL
+  * Fixes warning about address will never be NULL
+  * Fixes compiler warning: comparison will always evaluate as ‘true’
+  * Merge pull request #2799 from smoe/docs_translations_rpi_02
+  * Merge pull request #2798 from phillc54/phillc54/pncconf
+  * Merge pull request #2742 from mozmck/2.9-g64fix
+  * qtdragon_hd -fix setting of axis tool buttons on 4th/5th axes
+  * qtdragon -maxprobe should be a positive number
+  * qtvcp -pstat: add ability to import the default handler class for
+      subclassing
+  * Merge pull request #2797 from smoe/docs_translations_mix_01
+  * Fix PyNGCGUI for several configurations
+  * docs: mostly white space, some punctuation.
+  * docs: improved (?) clarity on RPi HAL GPIO ports
+  * pncconf: use CSS for coloring stepscale and encoderscale widgets
+  * docs: Reacting to 'self' in PR #2797
+  * docs: Series of smallish fixes.
+  * Fix G64 tolerance getting reset on E-stop
+
+ -- Moses McKnight <moses@candcnc.com>  Wed, 24 Jan 2024 21:35:38 -0600
+
+linuxcnc (1:2.9.2) unstable; urgency=medium
 
   * Add dither option to PWMGen for improved analog resolution
   * axis: Fix run-from-line - bug #2771
