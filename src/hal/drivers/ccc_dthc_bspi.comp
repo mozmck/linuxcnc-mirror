@@ -430,6 +430,13 @@ variable double prev_aset_upper_tol;
 variable int prev_response_trim;
 variable double prev_aset_lower_tol;
 
+/* Last THC packet built from the cfg.thc.* pins (or taken from the
+ * firmware's readback), so GUI edits and INI tuning changes are sent even
+ * when no G-code S-code or response-trim change asks for a write.
+ * Length 0 until the first write after the startup read. */
+variable uint8_t prev_thc_config[48];
+variable unsigned prev_thc_config_len;
+
 /* ---- Firmware update bridge state ---- */
 variable void *bridge_shmem_ptr;
 variable unsigned bridge_inflight;
@@ -936,6 +943,26 @@ static int dthc_track_bootloader(struct __comp_state *__comp_inst, uint8_t cmd,
  */
 #define DTHC_CONFIG_REPLY_REV_END   42u
 #define DTHC_CONFIG_REPLY_BYTES     43u
+
+static uint8_t dthc_build_thc_config_payload(struct __comp_state *__comp_inst,
+                                             uint8_t *payload);
+
+/* Whether the cfg.thc.* pins now build a THC packet other than the last
+ * one taken (prev_thc_config); with take set it becomes the last one. */
+static int dthc_thc_config_changed(struct __comp_state *__comp_inst, int take)
+{
+    uint8_t payload[DTHC_SPI_PAYLOAD_MAX];
+    uint8_t len = dthc_build_thc_config_payload(__comp_inst, payload);
+
+    if ((prev_thc_config_len == len) && !memcmp(prev_thc_config, payload, len))
+        return 0;
+    if (take) {
+        memcpy(prev_thc_config, payload, len);
+        prev_thc_config_len = len;
+    }
+    return 1;
+}
+
 static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
                                     const uint8_t *payload, uint8_t payload_len)
 {
@@ -968,9 +995,20 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     config_valid = 1;
 
     /* Echo writable cfg pins back from firmware so the GUI sees the
-     * initial values on startup (mirrors c3_main HAL_IO pin behaviour). */
-    cfg_thc_set_point = dthc_get_u16(payload + 3) / 16;
-    cfg_thc_delay     = (double)dthc_get_u16(payload + 1) / 1000.0;
+     * initial values on startup, and any value the firmware clamped
+     * (mirrors c3_main HAL_IO pin behaviour).  The echo is the firmware's
+     * state, not an edit, so it becomes the last THC packet taken and
+     * dthc_check_thc_settings() does not send it back.  Skipped while an
+     * edit is still unsent: this cycle's write() sends it, and the echo
+     * would put the firmware's old value in its place.  A read requested
+     * just before an edit can still answer with the old value; the read
+     * that follows the edit's write then shows the new one. */
+    if (!prev_thc_config_len || !dthc_thc_config_changed(__comp_inst, 0)) {
+        cfg_thc_set_point = dthc_get_u16(payload + 3) / 16;
+        cfg_thc_delay     = (double)dthc_get_u16(payload + 1) / 1000.0;
+        if (prev_thc_config_len)
+            dthc_thc_config_changed(__comp_inst, 1);
+    }
 
     fw_steps_per_unit         = dthc_get_u32(payload + 19);
     fb_motor_max_up_velocity  = dthc_get_u32(payload + 23);
@@ -2085,8 +2123,22 @@ static void dthc_update_auto_delay(struct __comp_state *__comp_inst)
 }
 
 /* ================================================================
- * Autosettings tolerance change detection
+ * THC settings and Auto-Set tolerance change detection
  * ================================================================ */
+/* A Preset Volts or THC delay edit on the screen, or an INI tuning value,
+ * changes a cfg.thc.* pin without a G-code S-code.  Send the THC packet
+ * whenever the pins build one other than the last (the first after the
+ * startup read sends the INI values once).  Comparing the wire bytes
+ * includes the setpoint, the manual or automatic delay, limits, gains,
+ * deadband and trim, and ignores sub-resolution float differences. */
+static void dthc_check_thc_settings(struct __comp_state *__comp_inst)
+{
+    if (!config_valid || !fw_version_ok)
+        return;
+    if (dthc_thc_config_changed(__comp_inst, 1))
+        pending_thc_config_write = 1;
+}
+
 static void dthc_check_autosettings(struct __comp_state *__comp_inst)
 {
     if (cfg_autoset_upper_tol != prev_aset_upper_tol ||
@@ -2154,6 +2206,9 @@ static int write(void *subdata)
 
     /* ---- VAD / auto-delay ---- */
     dthc_update_auto_delay(__comp_inst);
+
+    /* ---- GUI/INI THC setting changes ---- */
+    dthc_check_thc_settings(__comp_inst);
 
     /* ---- Autosettings tolerance change ---- */
     dthc_check_autosettings(__comp_inst);
@@ -2425,6 +2480,7 @@ EXTRA_SETUP()
     prev_aset_upper_tol = -1.0;
     prev_aset_lower_tol = -1.0;
     prev_response_trim = 0x7fffffff;  /* send the panel's trim once */
+    prev_thc_config_len = 0;          /* send the THC pins once at startup */
 
     r = hal_stream_create(&dthc_voltage_stream, comp_id,
                           DTHC_VOLTAGE_STREAM_KEY,
