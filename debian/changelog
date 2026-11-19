@@ -1,3 +1,10 @@
+linuxcnc (1:2.9.2~ccc3.1) unstable; urgency=medium
+
+  * Fix for gantry following errors
+  * Updates to ccc_dthc_bspi.comp
+
+ -- Moses McKnight <moses@candcnc.com>  Wed, 18 Nov 2026 19:40:17 -0600
+
 linuxcnc (1:2.9.2~ccc3.0) unstable; urgency=medium
 
   * Added ccc_dthc_bspi.comp for dthc using bspi
