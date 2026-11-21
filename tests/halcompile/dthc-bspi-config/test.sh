@@ -16,3 +16,4 @@ sim: dthc_bspi_config_sim.c ccc_dthc_bspi.c
 MK
 make -s -f sim.mk sim
 ./sim
+./sim motor

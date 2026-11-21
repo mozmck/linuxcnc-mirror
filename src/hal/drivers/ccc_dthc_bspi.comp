@@ -145,7 +145,6 @@ pin io u32 cfg.control.auto-flags "Auto: 1 kerf hold (its thresholds follow meas
 pin out bit fb.profile.valid;
 pin out bit fb.profile.provisional;
 pin out bit fb.profile.fault;
-pin out u32 fb.profile.generation;
 pin out u32 fb.profile.crc;
 pin out u32 fb.profile.last-status "0 success; 1 request; 2 torch; 3 validation; 4 CRC readback; 5 host interlock abort";
 pin out u32 fb.profile.read-sequence "Increments after a complete CRC-checked profile readback";
@@ -215,6 +214,8 @@ pin out bit status.observer-active;
 pin out bit status.target-active;
 pin out bit status.slowdown-active;
 pin out bit status.down-lock;
+pin out bit status.settings-unsaved "A settings change the DTHC6 has not saved to flash yet (it saves once writes stop and the machine is idle)";
+pin out bit status.settings-write-error "The DTHC6's last settings save to flash failed";
 pin out u32 status.vad-mode "Speed-hold mode the firmware applies (trace)";
 pin out bit status.vad-hold "Firmware holds Z for XY speed now";
 
@@ -378,7 +379,7 @@ variable unsigned trace_cycle;
 variable unsigned trace_age_cycles;
 variable unsigned reported_fw_rev;
 variable uint32_t host_sample_sequence;
-variable uint8_t profile_bytes[71];
+variable uint8_t profile_bytes[67];
 
 /* ---- Online countdown ---- */
 variable unsigned online_countdown;
@@ -437,6 +438,21 @@ variable double prev_aset_lower_tol;
 variable uint8_t prev_thc_config[48];
 variable unsigned prev_thc_config_len;
 
+/* Motor settings: the last packet built from cfg.motor.* (a change asks for
+ * a readback to compare), the acknowledged motor writes a readback has not
+ * yet matched, and the servo cycles a CONFIG read has gone unanswered. */
+variable uint8_t prev_motor_config[48];
+variable unsigned motor_write_tries;
+variable unsigned config_read_wait;
+
+/* The CONF_SET awaiting its acknowledgement: its kind (DTHC_CONF_SET_THC or
+ * _MOTOR), frame CRC and the cycles waited (0 for none), and the sends since
+ * the last acknowledgement. */
+variable unsigned conf_set_kind;
+variable unsigned conf_set_crc;
+variable unsigned conf_set_wait;
+variable unsigned conf_set_tries;
+
 /* ---- Firmware update bridge state ---- */
 variable void *bridge_shmem_ptr;
 variable unsigned bridge_inflight;
@@ -460,6 +476,23 @@ include <string.h>;
 #define DTHC_SPI_BSPI_CHANNEL 0
 /* Servo cycles comm.online stays true after the last good frame. */
 #define DTHC_ONLINE_TIMEOUT_CYCLES 100u
+/* The DTHC6 stops SPI while it saves its settings to flash (tens of ms,
+ * more on worn flash), and frames sent meanwhile are lost.  Firmware 3.1
+ * saves only once the writes stop and the machine is idle, but a frame can
+ * still land in a save.  So:
+ * - each CONF_SET is acknowledged (with its CRC) two cycles later; one not
+ *   acknowledged within DTHC_CONF_SET_ACK_CYCLES is sent again, up to
+ *   DTHC_CONF_SET_TRIES times, and the next CONF_SET waits for the ack;
+ * - an unanswered CONFIG read is sent again after DTHC_CONFIG_RETRY_CYCLES;
+ * - a motor readback that still differs after DTHC_MOTOR_WRITE_TRIES
+ *   acknowledged writes is reported once (the firmware replaces out-of-range
+ *   values) instead of being written forever. */
+#define DTHC_CONF_SET_ACK_CYCLES   50u
+#define DTHC_CONF_SET_TRIES        20u
+#define DTHC_CONFIG_RETRY_CYCLES   100u
+#define DTHC_MOTOR_WRITE_TRIES     2u
+#define DTHC_CONF_SET_THC          1u
+#define DTHC_CONF_SET_MOTOR        2u
 
 #define DTHC_SPI_SOF          0x55u
 
@@ -474,7 +507,7 @@ include <string.h>;
 #define DTHC_STAT_DELAY          0x00000002u
 #define DTHC_STAT_TIPSAVE_ACT    0x00000004u
 #define DTHC_STAT_ENABLED        0x00000008u
-#define DTHC_STAT_TIPSAVE_ON     0x00000010u
+#define DTHC_STAT_SETTINGS_UNSAVED 0x00000010u
 #define DTHC_STAT_EEREAD_ERR     0x00000020u
 #define DTHC_STAT_EEWRITE_ERR    0x00000040u
 #define DTHC_STAT_ARCOK_ON       0x00000080u
@@ -531,19 +564,19 @@ enum {
 #define DTHC_VOLTAGE_STREAM_DEPTH   50000
 /* 21 HAL stream slots: two ticks, packed sample flags, 17 floats, packed trace flags. */
 #define DTHC_VOLTAGE_STREAM_TYPES   "uuufffffffffffffffffu"
-/* The one firmware revision this driver speaks; the profile is version 8,
- * 71 bytes, in three pages. */
-#define DTHC_FW_REV                 30u
+/* The one firmware revision this driver speaks; the profile is version 9,
+ * 67 bytes, in three pages. */
+#define DTHC_FW_REV                 31u
 /* The bootloader reuses two application opcodes, with reply lengths the
- * application never sends: STATUS is opcode 14 (application PROFILE, 14 bytes
+ * application never sends: STATUS is opcode 14 (application PROFILE, 10 bytes
  * or more) with 1 or 3 bytes, and PING is opcode 12 (application AUTOSETTINGS,
  * 2 bytes) with 3.  An application that gets a PING treats it as a read of
  * the Auto-Set tolerances. */
 #define DTHC_BTLDR_RSP_STATUS       DTHC_SPI_CMD_PROFILE
 #define DTHC_BTLDR_CMD_PING         DTHC_SPI_CMD_AUTOSETTINGS
-#define DTHC_PROFILE_REPLY_MIN      14u
+#define DTHC_PROFILE_REPLY_MIN      10u
 #define DTHC_DEVICE_CODE            25u
-#define DTHC_PROFILE_BYTES          71u
+#define DTHC_PROFILE_BYTES          67u
 #define DTHC_VAD_MODE_HOST          0u
 #define DTHC_VAD_MODE_FIRMWARE      1u
 #define DTHC_VAD_MODE_AUTO          2u
@@ -808,6 +841,8 @@ static void dthc_apply_status(struct __comp_state *__comp_inst, uint32_t status)
     status_target_active = (status & DTHC_STAT_TARGET_ACTIVE) ? 1 : 0;
     status_slowdown_active = (status & DTHC_STAT_SLOWDOWN_ACTIVE) ? 1 : 0;
     status_down_lock = (status & DTHC_STAT_DOWN_LOCK) ? 1 : 0;
+    status_settings_unsaved = (status & DTHC_STAT_SETTINGS_UNSAVED) ? 1 : 0;
+    status_settings_write_error = (status & DTHC_STAT_EEWRITE_ERR) ? 1 : 0;
     fb_profile_provisional = (status & DTHC_STAT_PROFILE_PROV) ? 1 : 0;
     fb_profile_fault = (status & DTHC_STAT_PROFILE_FAULT) ? 1 : 0;
 }
@@ -971,6 +1006,7 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
         comm_bad_frames++;
         return;
     }
+    config_read_wait = 0;
 
     /* The revision first: nothing else is trusted from another one. */
     fw_app_rev = dthc_get_u32(payload + 38);
@@ -999,11 +1035,13 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
      * (mirrors c3_main HAL_IO pin behaviour).  The echo is the firmware's
      * state, not an edit, so it becomes the last THC packet taken and
      * dthc_check_thc_settings() does not send it back.  Skipped while an
-     * edit is still unsent: this cycle's write() sends it, and the echo
-     * would put the firmware's old value in its place.  A read requested
-     * just before an edit can still answer with the old value; the read
-     * that follows the edit's write then shows the new one. */
-    if (!prev_thc_config_len || !dthc_thc_config_changed(__comp_inst, 0)) {
+     * edit is still unsent or unacknowledged: write() sends it (again),
+     * and the echo would put the firmware's old value in its place.  A read
+     * requested just before an edit can still answer with the old value;
+     * the read that follows the edit's write then shows the new one. */
+    if (!pending_thc_config_write &&
+        !(conf_set_wait && (conf_set_kind == DTHC_CONF_SET_THC)) &&
+        (!prev_thc_config_len || !dthc_thc_config_changed(__comp_inst, 0))) {
         cfg_thc_set_point = dthc_get_u16(payload + 3) / 16;
         cfg_thc_delay     = (double)dthc_get_u16(payload + 1) / 1000.0;
         if (prev_thc_config_len)
@@ -1029,16 +1067,59 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
      * reflects what is currently stored in the DTHC, while cfg.motor.*
      * contains the INI-backed settings that CommandCNC wants.  Send the
      * complete motor configuration only when at least one field differs,
-     * then request another config reply to verify it (handled by write()). */
-    if ((fw_steps_per_unit          != cfg_motor_steps_per_unit) ||
+     * then request another config reply to verify it (handled by write()).
+     * A value the firmware replaces is reported once instead of being
+     * written forever.  A readback from before an unacknowledged write is
+     * not compared: its ack and the read after it follow. */
+    if (conf_set_wait && (conf_set_kind == DTHC_CONF_SET_MOTOR)) {
+        /* compared on the next readback */
+    } else if ((fw_steps_per_unit          != cfg_motor_steps_per_unit) ||
         (fb_motor_max_up_velocity   != cfg_motor_max_up_velocity) ||
         (fb_motor_max_down_velocity != cfg_motor_max_down_velocity) ||
         (fb_motor_acceleration      != cfg_motor_acceleration) ||
         (fw_dir_up_polarity         != (cfg_motor_dir_up_polarity ? 1u : 0u)) ||
         (fw_step_polarity           != (cfg_motor_step_polarity ? 1u : 0u)) ||
         (fw_metric_units            != (cfg_motor_metric_units ? 1u : 0u))) {
-        pending_motor_config_write = 1;
+        if (motor_write_tries < DTHC_MOTOR_WRITE_TRIES) {
+            pending_motor_config_write = 1;
+        } else if (motor_write_tries == DTHC_MOTOR_WRITE_TRIES) {
+            motor_write_tries++;
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "ccc_dthc_bspi: the DTHC6 did not keep the [DTHC] motor "
+                "settings: it holds steps %u, velocity %u/%u, acceleration "
+                "%u, direction %u for steps %u, velocity %u/%u, acceleration "
+                "%u, direction %u\n",
+                fw_steps_per_unit, (unsigned)fb_motor_max_up_velocity,
+                (unsigned)fb_motor_max_down_velocity,
+                (unsigned)fb_motor_acceleration, fw_dir_up_polarity,
+                (unsigned)cfg_motor_steps_per_unit,
+                (unsigned)cfg_motor_max_up_velocity,
+                (unsigned)cfg_motor_max_down_velocity,
+                (unsigned)cfg_motor_acceleration,
+                cfg_motor_dir_up_polarity ? 1u : 0u);
+        }
+    } else {
+        motor_write_tries = 0;
     }
+}
+
+/* CONF_SET acknowledgement: [0] mode, [1] the write's frame CRC, [2] 1 when
+ * applied (a motor write while the torch is on is not; it is sent again). */
+static void dthc_parse_conf_set_ack(struct __comp_state *__comp_inst,
+                                    const uint8_t *payload,
+                                    uint8_t payload_len)
+{
+    if (payload_len < 3u) {
+        comm_bad_length++;
+        comm_bad_frames++;
+        return;
+    }
+    if (!conf_set_wait || (payload[1] != (uint8_t)conf_set_crc) || !payload[2])
+        return;
+    conf_set_wait = 0;
+    conf_set_tries = 0;
+    if (conf_set_kind == DTHC_CONF_SET_MOTOR)
+        motor_write_tries++;
 }
 
 static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
@@ -1056,60 +1137,59 @@ static void dthc_parse_autosettings_reply(struct __comp_state *__comp_inst,
     cfg_autoset_lower_tol = (double)payload[1] / 16.0;
 }
 
-/* Profile version 8, 71 bytes, big-endian (thc_profile_serialize()):
- *   [0..3] generation, [4..6] observer/target/slowdown mode,
- *   [7] feedforward cap, [8..11] deadzone min/max (Q4), [12..15] kquiet
- *   (Q16), [16..31] e spans (nm), [32..35] alpha/beta (Q16), [36..39]
- *   residual clip (nm), [40..41] decay (Q16), [42..45] confidence rise,
- *   fall, min apply, evidence ticks, [46..48] VAD down min, lock, unlock,
- *   [49] target feed exponent (centi), [50..51] C_ref (mV), [52..53] max
- *   offset (Q4), [54..55] F_ref (mm/min), [56..57] lead (um), [58..61]
- *   slowdown Z margin, attack, release, min confidence, [62] target
- *   cutoff, [63..68] slowdown delay, min on, timeout (ms), [69] brake
- *   share, [70] Auto flags.  The target and slowdown modes are the
+/* Profile version 9, 67 bytes, big-endian (thc_profile_serialize()):
+ *   [0..2] observer/target/slowdown mode,
+ *   [3] feedforward cap, [4..7] deadzone min/max (Q4), [8..11] kquiet
+ *   (Q16), [12..27] e spans (nm), [28..31] alpha/beta (Q16), [32..35]
+ *   residual clip (nm), [36..37] decay (Q16), [38..41] confidence rise,
+ *   fall, min apply, evidence ticks, [42..44] VAD down min, lock, unlock,
+ *   [45] target feed exponent (centi), [46..47] C_ref (mV), [48..49] max
+ *   offset (Q4), [50..51] F_ref (mm/min), [52..53] lead (um), [54..57]
+ *   slowdown Z margin, attack, release, min confidence, [58] target
+ *   cutoff, [59..64] slowdown delay, min on, timeout (ms), [65] brake
+ *   share, [66] Auto flags.  The target and slowdown modes are the
  *   stored ones; at run time point 9 runs only in AVAD (thc.vad-enabled
  *   and thc.vad-auto) and point 10 only with thc.slowdown-enable. */
 static void dthc_profile_to_pins(struct __comp_state *__comp_inst)
 {
-    cfg_control_observer_mode = profile_bytes[4];
-    cfg_control_target_mode = profile_bytes[5];
-    cfg_control_slowdown_mode = profile_bytes[6];
-    cfg_control_feedforward_cap = (double)profile_bytes[7] / 255.0;
-    cfg_control_deadzone_min = (double)dthc_get_u16(profile_bytes + 8) / 16.0;
-    cfg_control_deadzone_max = (double)dthc_get_u16(profile_bytes + 10) / 16.0;
-    cfg_control_kquiet_per_s = (double)dthc_get_u32(profile_bytes + 12) / 65536.0;
-    cfg_control_e_nominal_up_mm = (double)dthc_get_u32(profile_bytes + 16) / 1000000.0;
-    cfg_control_e_high_up_mm = (double)dthc_get_u32(profile_bytes + 20) / 1000000.0;
-    cfg_control_e_nominal_down_mm = (double)dthc_get_u32(profile_bytes + 24) / 1000000.0;
-    cfg_control_e_high_down_mm = (double)dthc_get_u32(profile_bytes + 28) / 1000000.0;
-    cfg_control_observer_alpha = (double)dthc_get_u16(profile_bytes + 32) / 65536.0;
-    cfg_control_observer_beta = (double)dthc_get_u16(profile_bytes + 34) / 65536.0;
-    cfg_control_residual_clip_mm = (double)dthc_get_u32(profile_bytes + 36) / 1000000.0;
-    cfg_control_observer_decay = (double)dthc_get_u16(profile_bytes + 40) / 65536.0;
-    cfg_control_confidence_rise = profile_bytes[42];
-    cfg_control_confidence_fall = profile_bytes[43];
-    cfg_control_confidence_min_apply = (double)profile_bytes[44] / 255.0;
-    cfg_control_conf_evidence_ms = profile_bytes[45];
-    cfg_control_vad_down_min = (double)profile_bytes[46] / 255.0;
-    cfg_control_vad_lock = (double)profile_bytes[47] / 255.0;
-    cfg_control_vad_unlock = (double)profile_bytes[48] / 255.0;
-    cfg_control_target_feed_exponent = (double)profile_bytes[49] / 100.0;
-    cfg_control_target_c_ref = (double)dthc_get_u16(profile_bytes + 50) / 1000.0;
+    cfg_control_observer_mode = profile_bytes[0];
+    cfg_control_target_mode = profile_bytes[1];
+    cfg_control_slowdown_mode = profile_bytes[2];
+    cfg_control_feedforward_cap = (double)profile_bytes[3] / 255.0;
+    cfg_control_deadzone_min = (double)dthc_get_u16(profile_bytes + 4) / 16.0;
+    cfg_control_deadzone_max = (double)dthc_get_u16(profile_bytes + 6) / 16.0;
+    cfg_control_kquiet_per_s = (double)dthc_get_u32(profile_bytes + 8) / 65536.0;
+    cfg_control_e_nominal_up_mm = (double)dthc_get_u32(profile_bytes + 12) / 1000000.0;
+    cfg_control_e_high_up_mm = (double)dthc_get_u32(profile_bytes + 16) / 1000000.0;
+    cfg_control_e_nominal_down_mm = (double)dthc_get_u32(profile_bytes + 20) / 1000000.0;
+    cfg_control_e_high_down_mm = (double)dthc_get_u32(profile_bytes + 24) / 1000000.0;
+    cfg_control_observer_alpha = (double)dthc_get_u16(profile_bytes + 28) / 65536.0;
+    cfg_control_observer_beta = (double)dthc_get_u16(profile_bytes + 30) / 65536.0;
+    cfg_control_residual_clip_mm = (double)dthc_get_u32(profile_bytes + 32) / 1000000.0;
+    cfg_control_observer_decay = (double)dthc_get_u16(profile_bytes + 36) / 65536.0;
+    cfg_control_confidence_rise = profile_bytes[38];
+    cfg_control_confidence_fall = profile_bytes[39];
+    cfg_control_confidence_min_apply = (double)profile_bytes[40] / 255.0;
+    cfg_control_conf_evidence_ms = profile_bytes[41];
+    cfg_control_vad_down_min = (double)profile_bytes[42] / 255.0;
+    cfg_control_vad_lock = (double)profile_bytes[43] / 255.0;
+    cfg_control_vad_unlock = (double)profile_bytes[44] / 255.0;
+    cfg_control_target_feed_exponent = (double)profile_bytes[45] / 100.0;
+    cfg_control_target_c_ref = (double)dthc_get_u16(profile_bytes + 46) / 1000.0;
     cfg_control_target_max_offset =
-        (double)dthc_get_u16(profile_bytes + 52) / 16.0;
-    cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 54);
-    cfg_control_target_lead_mm = (double)dthc_get_u16(profile_bytes + 56) / 1000.0;
-    cfg_control_slowdown_z_margin = (double)profile_bytes[58] / 255.0;
-    cfg_control_slowdown_attack = (double)profile_bytes[59] / 255.0;
-    cfg_control_slowdown_release = (double)profile_bytes[60] / 255.0;
-    cfg_control_slowdown_min_conf = (double)profile_bytes[61] / 255.0;
-    cfg_control_target_cutoff = (double)profile_bytes[62] / 255.0;
-    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 63);
-    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 65);
-    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 67);
-    cfg_control_brake_accel_fraction = (double)profile_bytes[69] / 256.0;
-    cfg_control_auto_flags = profile_bytes[70];
-    fb_profile_generation = dthc_get_u32(profile_bytes + 0);
+        (double)dthc_get_u16(profile_bytes + 48) / 16.0;
+    cfg_control_target_feed_ref = dthc_get_u16(profile_bytes + 50);
+    cfg_control_target_lead_mm = (double)dthc_get_u16(profile_bytes + 52) / 1000.0;
+    cfg_control_slowdown_z_margin = (double)profile_bytes[54] / 255.0;
+    cfg_control_slowdown_attack = (double)profile_bytes[55] / 255.0;
+    cfg_control_slowdown_release = (double)profile_bytes[56] / 255.0;
+    cfg_control_slowdown_min_conf = (double)profile_bytes[57] / 255.0;
+    cfg_control_target_cutoff = (double)profile_bytes[58] / 255.0;
+    cfg_control_slowdown_delay_ms = dthc_get_u16(profile_bytes + 59);
+    cfg_control_slowdown_min_on_ms = dthc_get_u16(profile_bytes + 61);
+    cfg_control_slowdown_timeout_ms = dthc_get_u16(profile_bytes + 63);
+    cfg_control_brake_accel_fraction = (double)profile_bytes[65] / 256.0;
+    cfg_control_auto_flags = profile_bytes[66];
     fb_profile_valid = 1;
     fb_profile_read_sequence++;
 }
@@ -1119,64 +1199,64 @@ static void dthc_pins_to_profile(struct __comp_state *__comp_inst)
     unsigned mode;
     double brake;
     mode = cfg_control_observer_mode;
-    profile_bytes[4] = (mode > 3u) ? 0u : (uint8_t)mode;
+    profile_bytes[0] = (mode > 3u) ? 0u : (uint8_t)mode;
     mode = cfg_control_target_mode;
-    profile_bytes[5] = (mode > 2u) ? 1u : (uint8_t)mode;
+    profile_bytes[1] = (mode > 2u) ? 1u : (uint8_t)mode;
     mode = cfg_control_slowdown_mode;
-    profile_bytes[6] = (mode > 2u) ? 1u : (uint8_t)mode;
-    profile_bytes[7] = dthc_encode_fraction_q8(cfg_control_feedforward_cap);
-    dthc_put_u16(profile_bytes + 8, dthc_encode_q4(cfg_control_deadzone_min));
-    dthc_put_u16(profile_bytes + 10, dthc_encode_q4(cfg_control_deadzone_max));
-    dthc_put_u32(profile_bytes + 12,
+    profile_bytes[2] = (mode > 2u) ? 1u : (uint8_t)mode;
+    profile_bytes[3] = dthc_encode_fraction_q8(cfg_control_feedforward_cap);
+    dthc_put_u16(profile_bytes + 4, dthc_encode_q4(cfg_control_deadzone_min));
+    dthc_put_u16(profile_bytes + 6, dthc_encode_q4(cfg_control_deadzone_max));
+    dthc_put_u32(profile_bytes + 8,
         dthc_encode_uq16(cfg_control_kquiet_per_s));
-    dthc_put_u32(profile_bytes + 16,
+    dthc_put_u32(profile_bytes + 12,
         dthc_encode_u32(cfg_control_e_nominal_up_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 20,
+    dthc_put_u32(profile_bytes + 16,
         dthc_encode_u32(cfg_control_e_high_up_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 24,
+    dthc_put_u32(profile_bytes + 20,
         dthc_encode_u32(cfg_control_e_nominal_down_mm * 1000000.0));
-    dthc_put_u32(profile_bytes + 28,
+    dthc_put_u32(profile_bytes + 24,
         dthc_encode_u32(cfg_control_e_high_down_mm * 1000000.0));
-    dthc_put_u16(profile_bytes + 32,
+    dthc_put_u16(profile_bytes + 28,
         dthc_encode_u16(cfg_control_observer_alpha * 65536.0));
-    dthc_put_u16(profile_bytes + 34,
+    dthc_put_u16(profile_bytes + 30,
         dthc_encode_u16(cfg_control_observer_beta * 65536.0));
-    dthc_put_u32(profile_bytes + 36,
+    dthc_put_u32(profile_bytes + 32,
         dthc_encode_u32(cfg_control_residual_clip_mm * 1000000.0));
-    dthc_put_u16(profile_bytes + 40,
+    dthc_put_u16(profile_bytes + 36,
         dthc_encode_u16(cfg_control_observer_decay * 65536.0));
-    profile_bytes[42] = dthc_clamp_u8(cfg_control_confidence_rise);
-    profile_bytes[43] = dthc_clamp_u8(cfg_control_confidence_fall);
-    profile_bytes[44] = dthc_encode_fraction_q8(cfg_control_confidence_min_apply);
-    profile_bytes[45] = dthc_clamp_u8(cfg_control_conf_evidence_ms);
-    profile_bytes[46] = dthc_encode_fraction_q8(cfg_control_vad_down_min);
-    profile_bytes[47] = dthc_encode_fraction_q8(cfg_control_vad_lock);
-    profile_bytes[48] = dthc_encode_fraction_q8(cfg_control_vad_unlock);
-    profile_bytes[49] = dthc_clamp_u8(
+    profile_bytes[38] = dthc_clamp_u8(cfg_control_confidence_rise);
+    profile_bytes[39] = dthc_clamp_u8(cfg_control_confidence_fall);
+    profile_bytes[40] = dthc_encode_fraction_q8(cfg_control_confidence_min_apply);
+    profile_bytes[41] = dthc_clamp_u8(cfg_control_conf_evidence_ms);
+    profile_bytes[42] = dthc_encode_fraction_q8(cfg_control_vad_down_min);
+    profile_bytes[43] = dthc_encode_fraction_q8(cfg_control_vad_lock);
+    profile_bytes[44] = dthc_encode_fraction_q8(cfg_control_vad_unlock);
+    profile_bytes[45] = dthc_clamp_u8(
         dthc_encode_u16(cfg_control_target_feed_exponent * 100.0));
-    dthc_put_u16(profile_bytes + 50,
+    dthc_put_u16(profile_bytes + 46,
         dthc_encode_u16(cfg_control_target_c_ref * 1000.0));
-    dthc_put_u16(profile_bytes + 52,
+    dthc_put_u16(profile_bytes + 48,
         dthc_encode_q4(cfg_control_target_max_offset));
-    dthc_put_u16(profile_bytes + 54,
+    dthc_put_u16(profile_bytes + 50,
         dthc_encode_u16(cfg_control_target_feed_ref));
-    dthc_put_u16(profile_bytes + 56,
+    dthc_put_u16(profile_bytes + 52,
         dthc_encode_u16(cfg_control_target_lead_mm * 1000.0));
-    profile_bytes[58] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
-    profile_bytes[59] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
-    profile_bytes[60] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
-    profile_bytes[61] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
-    profile_bytes[62] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
-    dthc_put_u16(profile_bytes + 63,
+    profile_bytes[54] = dthc_encode_fraction_q8(cfg_control_slowdown_z_margin);
+    profile_bytes[55] = dthc_encode_fraction_q8(cfg_control_slowdown_attack);
+    profile_bytes[56] = dthc_encode_fraction_q8(cfg_control_slowdown_release);
+    profile_bytes[57] = dthc_encode_fraction_q8(cfg_control_slowdown_min_conf);
+    profile_bytes[58] = dthc_encode_fraction_q8(cfg_control_target_cutoff);
+    dthc_put_u16(profile_bytes + 59,
         dthc_encode_u16(cfg_control_slowdown_delay_ms));
-    dthc_put_u16(profile_bytes + 65,
+    dthc_put_u16(profile_bytes + 61,
         dthc_encode_u16(cfg_control_slowdown_min_on_ms));
-    dthc_put_u16(profile_bytes + 67,
+    dthc_put_u16(profile_bytes + 63,
         dthc_encode_u16(cfg_control_slowdown_timeout_ms));
     brake = cfg_control_brake_accel_fraction * 256.0 + 0.5;
-    profile_bytes[69] = (brake < 1.0) ? 1u :
+    profile_bytes[65] = (brake < 1.0) ? 1u :
                         (brake > 255.0) ? 255u : (uint8_t)brake;
-    profile_bytes[70] = dthc_clamp_u8(cfg_control_auto_flags);
+    profile_bytes[66] = dthc_clamp_u8(cfg_control_auto_flags);
 }
 
 static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
@@ -1185,7 +1265,7 @@ static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
 {
     uint8_t status, op, page, count;
     uint16_t total;
-    if (payload_len < 14u) {
+    if (payload_len < DTHC_PROFILE_REPLY_MIN) {
         comm_bad_length++;
         comm_bad_frames++;
         return;
@@ -1197,9 +1277,8 @@ static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
     if (profile_action == DTHC_PROFILE_NONE)
         return; /* Ignore a late reply from an aborted write. */
     fb_profile_last_status = status;
-    fb_profile_generation = dthc_get_u32(payload + 5);
-    fb_profile_crc = dthc_get_u32(payload + 9);
-    count = payload[13];
+    fb_profile_crc = dthc_get_u32(payload + 5);
+    count = payload[9];
 
     if ((total != DTHC_PROFILE_BYTES) || status != 0u) {
         fb_profile_valid = 0;
@@ -1214,21 +1293,21 @@ static void dthc_parse_profile_reply(struct __comp_state *__comp_inst,
         uint32_t expected = DTHC_PROFILE_BYTES - offset;
         uint32_t i;
         if (expected > DTHC_PROFILE_PAGE_BYTES) expected = DTHC_PROFILE_PAGE_BYTES;
-        if ((count != expected) || (payload_len < (uint8_t)(14u + count))) {
+        if ((count != expected) ||
+            (payload_len < (uint8_t)(DTHC_PROFILE_REPLY_MIN + count))) {
             fb_profile_valid = 0;
             profile_action = DTHC_PROFILE_NONE;
             profile_waiting = 0u;
             return;
         }
         for (i = 0; i < count; ++i)
-            profile_bytes[offset + i] = payload[14u + i];
+            profile_bytes[offset + i] = payload[DTHC_PROFILE_REPLY_MIN + i];
         profile_waiting = 0u;
         profile_page++;
         if (profile_page >= DTHC_PROFILE_PAGE_COUNT) {
             uint32_t readback_crc = dthc_crc32(
                 profile_bytes, DTHC_PROFILE_BYTES);
-            if ((readback_crc != fb_profile_crc) ||
-                (dthc_get_u32(profile_bytes) != fb_profile_generation)) {
+            if (readback_crc != fb_profile_crc) {
                 fb_profile_valid = 0;
                 fb_profile_last_status = 4u;
             } else {
@@ -2287,22 +2366,59 @@ static int write(void *subdata)
         return 0;
     }
 
+    /* ---- cfg.motor.* changed (INI at startup, or a live setp): read the
+     * board's settings back, which writes them if they differ ---- */
+    {
+        uint8_t motor[DTHC_SPI_PAYLOAD_MAX];
+        uint8_t n = dthc_build_motor_config_payload(__comp_inst, motor);
+        if (memcmp(prev_motor_config, motor, n)) {
+            memcpy(prev_motor_config, motor, n);
+            motor_write_tries = 0;
+            pending_config_read = 1;
+        }
+    }
+
+    /* ---- A CONF_SET not acknowledged: send it again ---- */
+    if (conf_set_wait && ++conf_set_wait > DTHC_CONF_SET_ACK_CYCLES) {
+        conf_set_wait = 0;
+        if (conf_set_tries < DTHC_CONF_SET_TRIES) {
+            if (conf_set_kind == DTHC_CONF_SET_THC)
+                pending_thc_config_write = 1;
+            else
+                pending_motor_config_write = 1;
+        } else {
+            conf_set_tries = 0;
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "ccc_dthc_bspi: the DTHC6 did not acknowledge the %s "
+                "settings\n",
+                (conf_set_kind == DTHC_CONF_SET_THC) ? "THC" : "motor");
+        }
+    }
+
+    /* ---- A CONFIG read lost to a settings save: ask again ---- */
+    if (config_read_wait && ++config_read_wait > DTHC_CONFIG_RETRY_CYCLES) {
+        config_read_wait = 0;
+        pending_config_read = 1;
+    }
+
     /* ---- SPI command sequencing (highest priority first) ---- */
     if ((profile_action != DTHC_PROFILE_NONE) && !profile_waiting) {
         cmd = DTHC_SPI_CMD_PROFILE;
         payload_len = dthc_build_profile_payload(__comp_inst, payload);
         profile_waiting = 1u;
         profile_wait_cycles = 0u;
-    } else if (pending_thc_config_write) {
+    } else if (pending_thc_config_write && !conf_set_wait) {
         cmd = DTHC_SPI_CMD_CONF_SET;
         payload_len = dthc_build_thc_config_payload(__comp_inst, payload);
         pending_thc_config_write = 0;
         pending_config_read = 1;
-    } else if (pending_motor_config_write) {
+        conf_set_kind = DTHC_CONF_SET_THC;
+    } else if (pending_motor_config_write && !conf_set_wait) {
         cmd = DTHC_SPI_CMD_CONF_SET;
         payload_len = dthc_build_motor_config_payload(__comp_inst, payload);
         pending_motor_config_write = 0;
         pending_config_read = 1;
+        conf_set_kind = DTHC_CONF_SET_MOTOR;
     } else if (pending_autosettings_write) {
         cmd = DTHC_SPI_CMD_AUTOSETTINGS;
         payload_len = dthc_build_autosettings_payload(__comp_inst, payload);
@@ -2310,6 +2426,7 @@ static int write(void *subdata)
     } else if (pending_config_read) {
         cmd = DTHC_SPI_CMD_CONFIG;
         pending_config_read = 0;
+        config_read_wait = 1;
     } else if (++trace_cycle >= (logging_enable ? 10u : 4u)) {
         cmd = DTHC_SPI_CMD_TRACE;
         trace_cycle = 0u;
@@ -2319,6 +2436,11 @@ static int write(void *subdata)
     }
 
     dthc_queue_frame(__comp_inst, cmd, payload, payload_len);
+    if (cmd == DTHC_SPI_CMD_CONF_SET) {
+        conf_set_crc = tx_frame[tx_frame[1]];
+        conf_set_wait = 1;
+        conf_set_tries++;
+    }
     return 0;
 }
 
@@ -2366,6 +2488,9 @@ static int read(void *subdata)
         break;
     case DTHC_SPI_CMD_CONFIG:
         dthc_parse_config_reply(__comp_inst, payload, payload_len);
+        break;
+    case DTHC_SPI_CMD_CONF_SET:
+        dthc_parse_conf_set_ack(__comp_inst, payload, payload_len);
         break;
     case DTHC_SPI_CMD_AUTOSETTINGS:
         dthc_parse_autosettings_reply(__comp_inst, payload, payload_len);
