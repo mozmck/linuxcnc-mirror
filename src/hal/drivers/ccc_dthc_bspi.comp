@@ -1031,7 +1031,8 @@ static void dthc_parse_config_reply(struct __comp_state *__comp_inst,
     config_valid = 1;
 
     /* Echo writable cfg pins back from firmware so the GUI sees the
-     * initial values on startup, and any value the firmware clamped
+     * board's values on startup (its defaults after it powers up: the
+     * DTHC6 keeps no THC settings in flash), and any value the firmware clamped
      * (mirrors c3_main HAL_IO pin behaviour).  The echo is the firmware's
      * state, not an edit, so it becomes the last THC packet taken and
      * dthc_check_thc_settings() does not send it back.  Skipped while an

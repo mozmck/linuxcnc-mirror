@@ -3,9 +3,9 @@
  * The driver's generated C is included; HAL, RTAPI and hm2 calls are
  * stubbed.  A fake DTHC6 answers each SPI frame one transfer later, so a
  * reply is parsed two servo cycles after its request.  It acknowledges each
- * CONF_SET and saves as firmware 3.1 does: save_quiet cycles after the last
- * write, dropping the link for save_gap cycles (the flash erases, with
- * interrupts masked).  A test makes a frame land in a save with busy (the
+ * CONF_SET and saves as firmware 3.1 does: only motor settings (and the
+ * profile), save_quiet cycles after the last such write, dropping the link
+ * for save_gap cycles (the flash erases, with interrupts masked).  A test makes a frame land in a save with busy (the
  * next frames are lost) or gap_next (the save starts with the next CONF_SET,
  * so its ack is lost).  "./sim motor" runs the motor-settings checks. */
 #include <stdarg.h>
@@ -172,8 +172,8 @@ static void fw_process(const uint8_t *f)
         if (fw.gap_next) {
             fw.busy = fw.gap_next;
             fw.gap_next = 0;
-        } else if (fw.save_gap) {
-            fw.quiet = 0;
+        } else if (fw.save_gap && d[0] == 1) {
+            fw.quiet = 0;   /* THC settings are not saved */
         }
         break;
     case DTHC_SPI_CMD_PROFILE: {
@@ -202,6 +202,7 @@ static void fw_process(const uint8_t *f)
                 memcpy(fw.prof, fw.staging, DTHC_PROFILE_BYTES);
                 fw.page_mask = 0;
                 fw.profile_commits++;
+                if (fw.save_gap) fw.quiet = 0;   /* saved like a motor change */
             }
         } else if (op == 3) {
             fw.page_mask = 0;
