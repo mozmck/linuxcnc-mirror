@@ -17,6 +17,17 @@ so each packet word carries four bytes. Write-side pins live under cfg.* and
 cmd.*. Readback pins live under fb.*, data.* and status.*. Voltage-history
 samples are forwarded through a private HAL stream for userspace logging.
 
+The BSPI receive FIFO is a plain stack of 32-bit words with no frame
+boundary, so each servo read must pop exactly the twelve words of the last
+transfer.  An hm2_eth packet error breaks that: hostmot2 skips read() for
+the cycle, and the write goes out after the 80 % read timeout, so its
+transfer is still running when the next read arrives.  The leftover words
+would then put every later reply across two reads, for good.  After any
+cycle whose read was skipped or whose frame was bad, write() clears both
+BSPI FIFOs ahead of the next frame (the clear rides in the same write
+packet, before the twelve TRAM writes) and counts it in comm.rx-resyncs.
+The link is back after about three frames.
+
 CMD_DATA requests carry a control-flags byte (bit-packed):
   bit 0 : motor_up
   bit 1 : thc_enable  (only used when use_enable_pin is 0)
@@ -344,6 +355,7 @@ pin out u32 comm.bad-frames;
 pin out u32 comm.bad-sof;
 pin out u32 comm.bad-crc;
 pin out u32 comm.bad-length;
+pin out u32 comm.rx-resyncs "BSPI FIFO clears after a skipped read or a bad frame (realigns the replies)";
 
 /* ---- Firmware update bridge ---- */
 pin in bit update.enable "Suspend runtime traffic and expose raw BSPI bridge";
@@ -383,6 +395,10 @@ variable uint8_t profile_bytes[67];
 
 /* ---- Online countdown ---- */
 variable unsigned online_countdown;
+
+/* ---- BSPI receive alignment: read() ran this cycle, and its frame ---- */
+variable unsigned rx_read_ran;
+variable unsigned rx_frame_ok;
 
 /* ---- Motor-test release-to-rearm interlock ---- */
 variable unsigned motor_test_armed;
@@ -2257,6 +2273,15 @@ static int write(void *subdata)
         return dthc_bridge_write(__comp_inst);
     }
 
+    /* Realign the BSPI receive FIFO (see the description).  hostmot2 queues
+     * this clear ahead of the TRAM writes, so it empties the FIFOs just
+     * before this cycle's frame; the previous transfer has normally ended. */
+    if (!rx_read_ran || !rx_frame_ok) {
+        if (hm2_bspi_clear_fifo(bspi_chan) >= 0)
+            comm_rx_resyncs++;
+    }
+    rx_read_ran = 0;
+
     /* Online countdown */
     if (online_countdown > 0)
         online_countdown--;
@@ -2461,6 +2486,8 @@ static int read(void *subdata)
 
     dthc_tram_to_frame(__comp_inst, rx_frame);
     frame_state = dthc_validate_frame(rx_frame, &cmd, &payload, &payload_len);
+    rx_read_ran = 1;
+    rx_frame_ok = (frame_state == DTHC_FRAME_OK) ? 1 : 0;
 
     if (frame_state != DTHC_FRAME_OK) {
         comm_bad_frames++;
